@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  # 🐘 데이터베이스: 일반 Postgres가 아닌 지도 기능이 강화된 PostGIS를 사용합니다.
+  db:
+    image: postgis/postgis:15-3.3
+    container_name: picklog-db
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: picklog
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # 🔴 캐시/비동기 작업용: 인스타그램 크롤링 같은 무거운 작업을 돕습니다.
+  redis:
+    image: redis:latest
+    container_name: picklog-redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+# 데이터를 컴퓨터에 저장해서 컨테이너를 껏다 켜도 유지되게 합니다.
+volumes:
+  postgres_data:
