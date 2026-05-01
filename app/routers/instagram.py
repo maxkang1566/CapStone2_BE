@@ -31,11 +31,18 @@ async def crawl_instagram_post(
     """인스타그램 게시물 URL을 받아 캡션/이미지 등을 크롤링합니다."""
     crawler = InstagramCrawler(manager=manager)
     try:
-        return await anyio.to_thread.run_sync(crawler.crawl_post, str(body.url))
+        result = await anyio.to_thread.run_sync(crawler.crawl_post, str(body.url))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except TimeoutError as e:
         raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(e)) from e
+
+    if not result.og_title and not result.og_description and not result.images:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="게시물을 불러올 수 없습니다. 비공개 계정이거나 삭제된 게시물일 수 있습니다.",
+        )
+    return result
 
 
 @router.post("/save", response_model=SpotResponse, status_code=status.HTTP_201_CREATED)
@@ -67,6 +74,13 @@ async def save_instagram_spot(
         raise HTTPException(status_code=400, detail=str(e)) from e
     except TimeoutError as e:
         raise HTTPException(status_code=504, detail=str(e)) from e
+
+    # OG 메타데이터가 비어있으면 비공개 계정이거나 삭제된 게시물
+    if not result.og_title and not result.og_description and not result.images:
+        raise HTTPException(
+            status_code=404,
+            detail="게시물을 불러올 수 없습니다. 비공개 계정이거나 삭제된 게시물일 수 있습니다.",
+        )
 
     # Place 생성 (인스타 게시물마다 독립적인 장소 레코드 생성)
     place = Place(

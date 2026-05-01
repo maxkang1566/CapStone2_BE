@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -32,6 +32,8 @@ def _get_member(
 @router.get("", response_model=list[SpotResponse])
 def list_spots(
     storage_id: int,
+    page: int = Query(1, ge=1, description="페이지 번호"),
+    size: int = Query(20, ge=1, le=100, description="페이지당 항목 수"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -39,6 +41,8 @@ def list_spots(
     return (
         db.query(Spot)
         .filter(Spot.storage_id == storage_id, Spot.deleted_at.is_(None))
+        .offset((page - 1) * size)
+        .limit(size)
         .all()
     )
 

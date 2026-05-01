@@ -27,7 +27,6 @@ class UserResponse(BaseModel):
     email: str
     nickname: Optional[str]
     profile_image: Optional[str]
-    kakao_id: Optional[str]
     created_at: datetime
 
 

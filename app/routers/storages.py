@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -31,10 +31,12 @@ def _get_member(
 
 @router.get("", response_model=list[StorageResponse])
 def list_storages(
+    page: int = Query(1, ge=1, description="페이지 번호"),
+    size: int = Query(20, ge=1, le=100, description="페이지당 항목 수"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """현재 유저가 멤버로 속한 모든 창고를 반환합니다 (소프트 삭제된 창고 제외)."""
+    """현재 유저가 멤버로 속한 창고 목록을 반환합니다 (소프트 삭제된 창고 제외)."""
     return (
         db.query(Storage)
         .join(StorageMember, Storage.id == StorageMember.storage_id)
@@ -42,6 +44,8 @@ def list_storages(
             StorageMember.user_id == current_user.id,
             Storage.deleted_at.is_(None),
         )
+        .offset((page - 1) * size)
+        .limit(size)
         .all()
     )
 
