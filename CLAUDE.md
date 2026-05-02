@@ -1,7 +1,8 @@
 # 프로젝트 개요
 
-이 프로젝트는 인스타그램 게시물을 우리 앱으로 공유하면, 게시물에 나온 장소 정보를 추출하여 자동으로 앱에 정리/저장하는 서비스입니다.
-장소의 특징을 분석하여 이를 MBTI형식으로 판단, 지정합니다.
+- **Project Name:** Picklog
+- **Core Concept:** 인스타그램 게시물을 우리 앱으로 공유하면, 해당 게시물에서 장소 정보를 추출하고 자동으로 아카이빙하는 백엔드 서비스입니다.
+- **Key Feature:** 장소의 특징(분위기, 혼잡도 등)을 분석하여 MBTI 형태의 독자적인 지표로 판단하고 부여하는 기능을 포함합니다.
 
 # CLAUDE.md
 
@@ -10,6 +11,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 언어 지침
 
 모든 결과값, 설명, 응답은 반드시 한글로 작성한다.
+
+## Workflow & Progress Tracking
+
+- **Always read `claude-progress.txt`** at the beginning of every session or task to understand the current project state.
+- **Update `claude-progress.txt`** before finishing a task:
+  - Move completed tasks to the 'Completed' section.
+  - Detail any new issues or bugs discovered.
+  - Define the next immediate steps for the project.
+- Ensure the progress log is concise and reflects the latest changes in the codebase.
 
 ## Commands
 

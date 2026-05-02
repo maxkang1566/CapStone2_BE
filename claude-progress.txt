@@ -147,13 +147,25 @@ pyproject.toml               Poetry 의존성
  6순위    |  유저 DNA 자동 업데이트   |  방문 체크인 시 트리거, 장소 DNA 의존
 
 
-8. 최근 수정 사항 (2026-05-01)
+8. 최근 수정 사항 (2026-05-02)
 ------------------------------------------------------------
+[2026-05-01]
 - OAuth2 인증 방식 수정: JSON body -> OAuth2PasswordRequestForm (Swagger 호환)
 - 리스트 API 페이징 적용: storages, spots에 page/size 파라미터 추가
 - Places 검색 API 신규 추가: GET /places?q=, GET /places/{id}
 - Instagram 예외 처리 강화: 비공개/삭제 게시물 감지 (404)
 - UserResponse에서 kakao_id 필드 제거 (미구현 기능 노출 방지)
 - python-multipart 패키지 추가
+
+[2026-05-02]
+- GET /places/{id}/raw-data 엔드포인트 추가: place_raw_data 원천 데이터 조회
+  - app/schemas/place.py: PlaceRawDataResponse 추가
+  - app/routers/places.py: 엔드포인트 + 인증 적용
+- place_reviews 테이블 신설 (Alembic migration: 5fe6c16c6978)
+  - AI 분석 대비 리뷰 정규화 저장 (place_raw_data와 분리)
+  - 컬럼: id, place_id, raw_data_id, provider, external_review_id, rating, text, reviewed_at, collected_at
+  - 인덱스: ix_place_reviews_place_id, partial unique (place_id, provider, external_review_id WHERE external_review_id IS NOT NULL)
+  - app/models/models.py: PlaceReview 클래스 + Place/PlaceRawData relationship 추가
+  - app/schemas/place.py: PlaceReviewResponse 추가
 
 ============================================================

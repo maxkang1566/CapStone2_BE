@@ -8,11 +8,13 @@ from sqlalchemy import (
     Boolean,
     Float,
     ForeignKey,
+    Index,
     Integer,
     PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
+    text as sa_text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -106,6 +108,9 @@ class Place(Base):
     images: Mapped[list[PlaceImage]] = relationship(
         "PlaceImage", back_populates="place", cascade="all, delete-orphan"
     )
+    reviews: Mapped[list[PlaceReview]] = relationship(
+        "PlaceReview", back_populates="place", cascade="all, delete-orphan"
+    )
     space_dna: Mapped[Optional[PlaceSpaceDNA]] = relationship(
         "PlaceSpaceDNA", back_populates="place", uselist=False, cascade="all, delete-orphan"
     )
@@ -128,6 +133,7 @@ class PlaceRawData(Base):
 
     place: Mapped[Place] = relationship("Place", back_populates="raw_data")
     images: Mapped[list[PlaceImage]] = relationship("PlaceImage", back_populates="raw_data")
+    reviews: Mapped[list[PlaceReview]] = relationship("PlaceReview", back_populates="raw_data")
 
 
 class Spot(Base):
@@ -253,3 +259,35 @@ class UserSpaceDNAHistory(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
 
     user: Mapped[User] = relationship("User", back_populates="dna_history")
+
+
+class PlaceReview(Base):
+    __tablename__ = "place_reviews"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    place_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("places.id", ondelete="CASCADE"), nullable=False
+    )
+    raw_data_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("place_raw_data.id", ondelete="SET NULL"), nullable=True
+    )
+    provider: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    external_review_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    rating: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    collected_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_place_reviews_place_id", "place_id"),
+        # external_review_id가 NOT NULL인 행에 대해서만 (place_id, provider, external_review_id) 중복 방지
+        Index(
+            "uq_place_reviews_place_provider_ext_id",
+            "place_id", "provider", "external_review_id",
+            unique=True,
+            postgresql_where=sa_text("external_review_id IS NOT NULL"),
+        ),
+    )
+
+    place: Mapped[Place] = relationship("Place", back_populates="reviews")
+    raw_data: Mapped[Optional[PlaceRawData]] = relationship("PlaceRawData", back_populates="reviews")

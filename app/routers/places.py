@@ -3,8 +3,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
-from app.models.models import Place, User
-from app.schemas.place import PlaceResponse
+from app.models.models import Place, PlaceRawData, User
+from app.schemas.place import PlaceRawDataResponse, PlaceResponse
 
 router = APIRouter(prefix="/places", tags=["places"])
 
@@ -38,3 +38,21 @@ def get_place(
     if not place:
         raise HTTPException(status_code=404, detail="장소를 찾을 수 없습니다.")
     return place
+
+
+@router.get("/{place_id}/raw-data", response_model=list[PlaceRawDataResponse])
+def get_place_raw_data(
+    place_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """특정 장소에 연결된 원천 데이터(인스타그램 등) 목록을 반환합니다."""
+    place = db.query(Place).filter(Place.id == place_id).first()
+    if not place:
+        raise HTTPException(status_code=404, detail="장소를 찾을 수 없습니다.")
+    return (
+        db.query(PlaceRawData)
+        .filter(PlaceRawData.place_id == place_id)
+        .order_by(PlaceRawData.collected_at.desc())
+        .all()
+    )
