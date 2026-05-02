@@ -20,7 +20,8 @@ dependencies = [
     "passlib[bcrypt] (>=1.7.4,<2.0.0)",
     "email-validator (>=2.3.0,<3.0.0)",
     "alembic (>=1.18.4,<2.0.0)",
-    "python-multipart (>=0.0.27,<0.0.28)"
+    "python-multipart (>=0.0.27,<0.0.28)",
+    "shapely (>=2.1.2,<3.0.0)"
 ]
 
 [tool.poetry]

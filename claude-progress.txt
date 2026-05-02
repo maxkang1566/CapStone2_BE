@@ -167,5 +167,11 @@ pyproject.toml               Poetry 의존성
   - 인덱스: ix_place_reviews_place_id, partial unique (place_id, provider, external_review_id WHERE external_review_id IS NOT NULL)
   - app/models/models.py: PlaceReview 클래스 + Place/PlaceRawData relationship 추가
   - app/schemas/place.py: PlaceReviewResponse 추가
+- PlaceResponse coordinate 직렬화 개선
+  - 기존: coordinate: Optional[str] -> WKB hex 문자열 노출 (클라이언트 사용 불가)
+  - 변경: latitude: Optional[float] + longitude: Optional[float] 분리 필드로 노출
+  - 구현: Pydantic v2 computed_field + geoalchemy2.shape.to_shape() 활용
+  - DB Geometry 컬럼은 그대로 유지 (PostGIS ST_DWithin 반경 검색 대비)
+  - 의존성 추가: shapely 2.1.2 (geoalchemy2 shape 변환에 필요)
 
 ============================================================
