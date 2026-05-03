@@ -70,15 +70,18 @@ class InstagramCrawler:
             # og:image는 대표 이미지 1장을 제공하는 경우가 많습니다.
             images.append(og_image)
 
-        # og:description에서 캡션/장소 힌트를 가볍게 추정합니다.
+        # script 태그에서 Instagram location_id/name 추출 시도, 실패 시 OG fallback
         caption = self._extract_caption_from_og(og_description)
-        location_name = self._extract_location_hint(og_description)
+        instagram_location_id, location_name = self._extract_location_from_scripts(soup)
+        if location_name is None:
+            location_name = self._extract_location_hint(og_description)
 
         return InstagramCrawlResponse(
             url=url,
             caption=caption,
             images=images,
             location_name=location_name,
+            instagram_location_id=instagram_location_id,
             og_title=og_title,
             og_description=og_description,
         )
@@ -91,6 +94,18 @@ class InstagramCrawler:
         if m:
             return m.group(1).strip() or None
         return og_description.strip() or None
+
+    def _extract_location_from_scripts(self, soup) -> tuple[str | None, str | None]:
+        """script 태그 JSON에서 "location":{"id":"...","name":"..."} 패턴을 탐색한다."""
+        for script in soup.find_all("script"):
+            text = script.string or ""
+            m = re.search(
+                r'"location"\s*:\s*\{"id"\s*:\s*"(\d+)"\s*,\s*"name"\s*:\s*"([^"]+)"',
+                text,
+            )
+            if m:
+                return m.group(1), m.group(2)
+        return None, None
 
     def _extract_location_hint(self, og_description: str | None) -> str | None:
         if not og_description:

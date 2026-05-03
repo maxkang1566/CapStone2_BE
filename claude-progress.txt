@@ -137,18 +137,19 @@ pyproject.toml               Poetry 의존성
 
 7. 미구현 항목 (향후 작업)
 ------------------------------------------------------------
- 우선순위  |  항목                    |  비고
-----------+--------------------------+-------------------------------
- 1순위    |  카카오 OAuth 로그인      |  kakao_id 컬럼은 DB에 준비됨
- 2순위    |  공간 탐색 (반경 검색)    |  PostGIS ST_DWithin, 네이버맵 API 연동 필요
- 3순위    |  창고 멤버 초대/관리      |  storage_members 스키마 설계 완료
- 4순위    |  공개 창고 탐색/피드      |  is_public 필드 활용
- 5순위    |  장소 DNA AI 분석         |  place_space_dna 테이블 준비됨
- 6순위    |  유저 DNA 자동 업데이트   |  방문 체크인 시 트리거, 장소 DNA 의존
- 7순위    |  네이버 지도 추가 필드    |  naver_place_id 기준 place_images 자동 저장 등
+ 우선순위  |  항목                              |  비고
+----------+------------------------------------+-------------------------------
+ 1순위    |  카카오 OAuth 로그인                |  kakao_id 컬럼은 DB에 준비됨
+ 2순위    |  공간 탐색 (반경 검색)              |  PostGIS ST_DWithin, 네이버맵 API 연동 필요
+ 3순위    |  창고 멤버 초대/관리                |  storage_members 스키마 설계 완료
+ 4순위    |  공개 창고 탐색/피드                |  is_public 필드 활용
+ 5순위    |  장소 DNA AI 분석                   |  place_space_dna 테이블 준비됨
+ 6순위    |  유저 DNA 자동 업데이트             |  방문 체크인 시 트리거, 장소 DNA 의존
+ 7순위    |  Instagram location_id 인증 추출    |  쿠키 주입 또는 네이버 API 우회 방식 필요
+ 8순위    |  네이버↔인스타 크로스 중복 병합     |  좌표 근접 매칭 또는 Place 병합 UI 필요
 
 
-8. 최근 수정 사항 (2026-05-02 업데이트)
+8. 최근 수정 사항 (2026-05-03 업데이트)
 ------------------------------------------------------------
 [2026-05-01]
 - OAuth2 인증 방식 수정: JSON body -> OAuth2PasswordRequestForm (Swagger 호환)
@@ -160,38 +161,36 @@ pyproject.toml               Poetry 의존성
 
 [2026-05-02]
 - GET /places/{id}/raw-data 엔드포인트 추가: place_raw_data 원천 데이터 조회
-  - app/schemas/place.py: PlaceRawDataResponse 추가
-  - app/routers/places.py: 엔드포인트 + 인증 적용
 - place_reviews 테이블 신설 (Alembic migration: 5fe6c16c6978)
-  - AI 분석 대비 리뷰 정규화 저장 (place_raw_data와 분리)
-  - 컬럼: id, place_id, raw_data_id, provider, external_review_id, rating, text, reviewed_at, collected_at
-  - 인덱스: ix_place_reviews_place_id, partial unique (place_id, provider, external_review_id WHERE external_review_id IS NOT NULL)
-  - app/models/models.py: PlaceReview 클래스 + Place/PlaceRawData relationship 추가
-  - app/schemas/place.py: PlaceReviewResponse 추가
-- PlaceResponse coordinate 직렬화 개선
-  - 기존: coordinate: Optional[str] -> WKB hex 문자열 노출 (클라이언트 사용 불가)
-  - 변경: latitude: Optional[float] + longitude: Optional[float] 분리 필드로 노출
-  - 구현: Pydantic v2 computed_field + geoalchemy2.shape.to_shape() 활용
-  - DB Geometry 컬럼은 그대로 유지 (PostGIS ST_DWithin 반경 검색 대비)
-  - 의존성 추가: shapely 2.1.2 (geoalchemy2 shape 변환에 필요)
-- 네이버 지도 기반 장소 Upsert (POST /places/from-naver) 추가
-  - NaverPlaceUpsertRequest: naver_place_id(필수), name, address, lat/lng, category_group, phone, homepage_url, raw_payload
-  - NaverPlaceUpsertResponse: place_id, created(신규여부), place(PlaceResponse)
-  - 로직: PlaceRawData(provider='naver', provider_place_id) 조회 → 있으면 재사용, 없으면 Place+PlaceRawData INSERT
-  - IntegrityError 동시 요청 충돌 처리: rollback 후 재조회
-  - WKTElement로 위도/경도 → PostGIS POINT 변환
-  - Alembic 마이그레이션 (a3f8b2c1d947): place_raw_data partial unique index 추가
-    uq_place_raw_data_provider_pid (provider, provider_place_id) WHERE provider_place_id IS NOT NULL
-  - PlaceRawData 모델에 __table_args__ 추가 (모델-DB 동기화)
-  - 검증 시나리오 5개 모두 통과
+- PlaceResponse coordinate → latitude/longitude 분리 필드로 개선
+- 네이버 지도 기반 장소 Upsert 초기 구현 (migration: a3f8b2c1d947)
+  - place_raw_data partial unique index: (provider, provider_place_id) WHERE provider_place_id IS NOT NULL
+  - Instagram 공유 → 기본 저장소 자동 저장 기능
 
 [2026-05-03]
-- API 명세서 추가: docs/API_SPECIFICATION.md (구현 엔드포인트·스키마·인증·오류 코드 정리)
-- notes/2026-05-03_api_specification.md 작업 메모
-- Instagram 공유 → 기본 저장소 자동 저장 기능 구현
-  - app/schemas/instagram.py: InstagramSaveRequest.storage_id를 Optional[int]로 변경
-  - app/routers/instagram.py: _get_default_storage_id() 헬퍼 추가, /save 엔드포인트 수정
-  - 기본 저장소 = role='owner' + deleted_at IS NULL + joined_at ASC 첫 번째 저장소
-  - 기존 storage_id 명시 호출과 완전 하위 호환 유지
+- 네이버 지도 장소 Upsert 완성 (POST /places/from-naver)
+  - app/schemas/place.py: NaverPlaceUpsertRequest, NaverPlaceUpsertResponse 추가
+  - app/routers/places.py: POST /places/from-naver 엔드포인트 (WKTElement 좌표 변환, IntegrityError 충돌 처리)
+  - 응답: { place_id, created: bool, place }
+    - created=true: 신규 생성 / created=false: 기존 재사용
+
+- Instagram 장소 중복 방지 (location_id 기반 upsert) 구현
+  - app/services/instagram_crawler.py: _extract_location_from_scripts() 추가
+    - <script> 태그 JSON에서 "location":{"id":"...","name":"..."} 패턴 탐색
+    - 실패 시 기존 OG description 파싱으로 fallback
+  - app/schemas/instagram.py: InstagramCrawlResponse에 instagram_location_id 필드 추가
+  - app/schemas/instagram.py: InstagramSaveResponse 신규 추가 (spot, already_saved, place_created)
+  - app/routers/instagram.py: POST /instagram/save 응답 모델 변경 및 upsert 로직 적용
+    - already_saved=true (HTTP 200): 이미 같은 장소 저장됨 → 기존 Spot 반환
+    - already_saved=false (HTTP 201): 신규 저장
+    - place_created: 새 Place 생성 여부
+
+- 주의사항:
+  - Instagram location_id는 비인증 상태에서 추출 불가 (Instagram이 스크립트 JSON 숨김)
+    → 현재 provider_place_id=None으로 저장, location_id 기반 중복 방지는 미작동
+    → 향후 쿠키 인증 또는 네이버 API 우회 방식으로 해결 필요
+  - Playwright + 핫리로드 병행 시 greenlet 오류 발생
+    → 코드 수정 후 반드시 서버 완전 재시작 필요
+    → 로컬 테스트는 `poetry run uvicorn app.main:app` (핫리로드 없이) 권장
 
 ============================================================

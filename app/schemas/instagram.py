@@ -1,5 +1,7 @@
 from pydantic import BaseModel, HttpUrl, Field
 
+from app.schemas.spot import SpotResponse
+
 
 class InstagramCrawlRequest(BaseModel):
     # 크롤링 대상 게시물 URL
@@ -18,8 +20,16 @@ class InstagramCrawlResponse(BaseModel):
     caption: str | None = None
     # 대표 이미지 URL 목록(현재는 OG image 위주)
     images: list[str] = Field(default_factory=list)
-    # 장소명 힌트(있으면 OG description에서 추정)
+    # 장소명 힌트(있으면 script 태그 또는 OG description에서 추정)
     location_name: str | None = None
+    # Instagram 위치 태그 고유 ID (script 태그에서 추출, 없으면 None)
+    instagram_location_id: str | None = None
     # OG 메타 원본(디버깅/품질 개선용)
     og_title: str | None = None
     og_description: str | None = None
+
+
+class InstagramSaveResponse(BaseModel):
+    spot: SpotResponse
+    already_saved: bool   # True = 이 storage에 이미 동일 장소 Spot이 존재했음
+    place_created: bool   # True = 새 Place가 생성됨

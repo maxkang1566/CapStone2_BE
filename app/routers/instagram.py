@@ -1,12 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 import anyio
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
 from app.models.models import Place, PlaceImage, PlaceRawData, Spot, Storage, StorageMember, User
-from app.schemas.instagram import InstagramCrawlRequest, InstagramCrawlResponse, InstagramSaveRequest
-from app.schemas.spot import SpotResponse
+from app.schemas.instagram import (
+    InstagramCrawlRequest,
+    InstagramCrawlResponse,
+    InstagramSaveRequest,
+    InstagramSaveResponse,
+)
 from app.services.instagram_crawler import InstagramCrawler
 from app.services.playwright_manager import PlaywrightManager
 
@@ -62,15 +67,17 @@ async def crawl_instagram_post(
     return result
 
 
-@router.post("/save", response_model=SpotResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/save", response_model=InstagramSaveResponse)
 async def save_instagram_spot(
     body: InstagramSaveRequest,
     manager: PlaywrightManager = Depends(get_manager),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> SpotResponse:
+) -> InstagramSaveResponse:
     """인스타그램 게시물을 크롤링해 Place → Spot으로 저장합니다.
-    storage_id 미제공 시 기본 저장소에 자동 저장합니다.
+    - location_id가 있으면 같은 장소의 기존 Spot을 재사용합니다.
+    - 이미 저장된 장소이면 already_saved=True와 기존 Spot을 반환합니다.
+    - storage_id 미제공 시 기본 저장소에 자동 저장합니다.
     """
     storage_id = body.storage_id if body.storage_id is not None else _get_default_storage_id(current_user.id, db)
 
@@ -84,8 +91,12 @@ async def save_instagram_spot(
     if member.role not in ("owner", "editor"):
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
 
-    # 크롤링
+    # 같은 게시물 URL 중복 저장 방지
     url_str = str(body.url)
+    if db.query(Spot).filter(Spot.storage_id == storage_id, Spot.instagram_url == url_str).first():
+        raise HTTPException(status_code=409, detail="이미 저장된 게시물입니다.")
+
+    # 크롤링
     crawler = InstagramCrawler(manager=manager)
     try:
         result = await anyio.to_thread.run_sync(crawler.crawl_post, url_str)
@@ -94,53 +105,105 @@ async def save_instagram_spot(
     except TimeoutError as e:
         raise HTTPException(status_code=504, detail=str(e)) from e
 
-    # OG 메타데이터가 비어있으면 비공개 계정이거나 삭제된 게시물
     if not result.og_title and not result.og_description and not result.images:
         raise HTTPException(
             status_code=404,
             detail="게시물을 불러올 수 없습니다. 비공개 계정이거나 삭제된 게시물일 수 있습니다.",
         )
 
-    # Place 생성 (인스타 게시물마다 독립적인 장소 레코드 생성)
-    place = Place(
-        name=result.location_name or "이름 없음",
-    )
-    db.add(place)
-    db.flush()  # place.id 확보
+    location_id = result.instagram_location_id
+    place: Place
+    place_created = False
 
-    # 원천 데이터 저장
-    raw_data = PlaceRawData(
-        place_id=place.id,
-        provider="instagram",
-        raw_payload={
-            "url": url_str,
-            "caption": result.caption,
-            "og_title": result.og_title,
-            "og_description": result.og_description,
-            "images": result.images,
-            "location_name": result.location_name,
-        },
-    )
-    db.add(raw_data)
-    db.flush()  # raw_data.id 확보
+    if location_id:
+        # location_id 기반 upsert
+        existing_raw = (
+            db.query(PlaceRawData)
+            .filter(
+                PlaceRawData.provider == "instagram",
+                PlaceRawData.provider_place_id == location_id,
+            )
+            .first()
+        )
+        if existing_raw:
+            # 기존 Place 재사용 — 이 storage에 이미 같은 장소 Spot이 있는지 확인
+            place = db.query(Place).filter(Place.id == existing_raw.place_id).first()
+            existing_spot = (
+                db.query(Spot)
+                .filter(
+                    Spot.storage_id == storage_id,
+                    Spot.place_id == place.id,
+                    Spot.deleted_at.is_(None),
+                )
+                .first()
+            )
+            if existing_spot:
+                return InstagramSaveResponse(
+                    spot=existing_spot,
+                    already_saved=True,
+                    place_created=False,
+                )
+        else:
+            # 새 Place + PlaceRawData 생성
+            try:
+                place = Place(name=result.location_name or "이름 없음")
+                db.add(place)
+                db.flush()
+                db.add(PlaceRawData(
+                    place_id=place.id,
+                    provider="instagram",
+                    provider_place_id=location_id,
+                    raw_payload={
+                        "url": url_str,
+                        "caption": result.caption,
+                        "og_title": result.og_title,
+                        "og_description": result.og_description,
+                        "images": result.images,
+                        "location_name": result.location_name,
+                        "instagram_location_id": location_id,
+                    },
+                ))
+                db.flush()
+                place_created = True
+            except IntegrityError:
+                db.rollback()
+                existing_raw = (
+                    db.query(PlaceRawData)
+                    .filter(
+                        PlaceRawData.provider == "instagram",
+                        PlaceRawData.provider_place_id == location_id,
+                    )
+                    .first()
+                )
+                place = db.query(Place).filter(Place.id == existing_raw.place_id).first()
+    else:
+        # location_id 없음 — fallback: 항상 새 Place 생성
+        place = Place(name=result.location_name or "이름 없음")
+        db.add(place)
+        db.flush()
+        db.add(PlaceRawData(
+            place_id=place.id,
+            provider="instagram",
+            raw_payload={
+                "url": url_str,
+                "caption": result.caption,
+                "og_title": result.og_title,
+                "og_description": result.og_description,
+                "images": result.images,
+                "location_name": result.location_name,
+            },
+        ))
+        db.flush()
+        place_created = True
 
     # 이미지 저장
     for idx, image_url in enumerate(result.images):
         db.add(PlaceImage(
             place_id=place.id,
-            raw_data_id=raw_data.id,
             image_url=image_url,
             source="instagram",
             is_representative=(idx == 0),
         ))
-
-    # 같은 창고에 동일 장소 중복 저장 방지 (여기서는 URL로 중복 체크)
-    existing = db.query(Spot).filter(
-        Spot.storage_id == storage_id,
-        Spot.instagram_url == url_str,
-    ).first()
-    if existing:
-        raise HTTPException(status_code=409, detail="이미 저장된 게시물입니다.")
 
     # Spot 생성
     thumbnail = result.images[0] if result.images else None
@@ -153,6 +216,10 @@ async def save_instagram_spot(
         user_memo=result.caption,
     )
     db.add(spot)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="이미 저장된 장소입니다.")
     db.refresh(spot)
-    return spot
+    return InstagramSaveResponse(spot=spot, already_saved=False, place_created=place_created)
