@@ -131,6 +131,15 @@ class PlaceRawData(Base):
     raw_payload: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     collected_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
 
+    __table_args__ = (
+        Index(
+            "uq_place_raw_data_provider_pid",
+            "provider", "provider_place_id",
+            unique=True,
+            postgresql_where=sa_text("provider_place_id IS NOT NULL"),
+        ),
+    )
+
     place: Mapped[Place] = relationship("Place", back_populates="raw_data")
     images: Mapped[list[PlaceImage]] = relationship("PlaceImage", back_populates="raw_data")
     reviews: Mapped[list[PlaceReview]] = relationship("PlaceReview", back_populates="raw_data")

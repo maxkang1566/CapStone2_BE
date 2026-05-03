@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(poetry run:*)"
+      "Bash(poetry run:*)",
+      "WebFetch(domain:naver.me)",
+      "WebFetch(domain:map.naver.com)"
     ]
   }
 }

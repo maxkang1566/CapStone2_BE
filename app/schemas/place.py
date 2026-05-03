@@ -53,6 +53,24 @@ class PlaceRawDataResponse(BaseModel):
     collected_at: datetime
 
 
+class NaverPlaceUpsertRequest(BaseModel):
+    naver_place_id: str
+    name: str
+    address: Optional[str] = None
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    category_group: Optional[str] = None
+    phone: Optional[str] = None
+    homepage_url: Optional[str] = None
+    raw_payload: Optional[dict] = None
+
+
+class NaverPlaceUpsertResponse(BaseModel):
+    place_id: int
+    created: bool
+    place: PlaceResponse
+
+
 class PlaceReviewResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

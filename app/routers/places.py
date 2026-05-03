@@ -1,12 +1,85 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from geoalchemy2.elements import WKTElement
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
 from app.models.models import Place, PlaceRawData, User
-from app.schemas.place import PlaceRawDataResponse, PlaceResponse
+from app.schemas.place import (
+    NaverPlaceUpsertRequest,
+    NaverPlaceUpsertResponse,
+    PlaceRawDataResponse,
+    PlaceResponse,
+)
 
 router = APIRouter(prefix="/places", tags=["places"])
+
+
+@router.post("/from-naver", response_model=NaverPlaceUpsertResponse, status_code=200)
+def upsert_place_from_naver(
+    body: NaverPlaceUpsertRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """네이버 지도 장소 ID 기준으로 Place를 찾거나 생성합니다."""
+    existing_raw = (
+        db.query(PlaceRawData)
+        .filter(
+            PlaceRawData.provider == "naver",
+            PlaceRawData.provider_place_id == body.naver_place_id,
+        )
+        .first()
+    )
+    if existing_raw:
+        return NaverPlaceUpsertResponse(
+            place_id=existing_raw.place_id,
+            created=False,
+            place=existing_raw.place,
+        )
+
+    coordinate = None
+    if body.latitude is not None and body.longitude is not None:
+        coordinate = WKTElement(f"POINT({body.longitude} {body.latitude})", srid=4326)
+
+    try:
+        place = Place(
+            name=body.name,
+            address=body.address,
+            coordinate=coordinate,
+            category_group=body.category_group,
+            phone=body.phone,
+            homepage_url=body.homepage_url,
+        )
+        db.add(place)
+        db.flush()
+
+        raw_data = PlaceRawData(
+            place_id=place.id,
+            provider="naver",
+            provider_place_id=body.naver_place_id,
+            raw_payload=body.raw_payload,
+        )
+        db.add(raw_data)
+        db.commit()
+        db.refresh(place)
+        return NaverPlaceUpsertResponse(place_id=place.id, created=True, place=place)
+
+    except IntegrityError:
+        db.rollback()
+        raw_data = (
+            db.query(PlaceRawData)
+            .filter(
+                PlaceRawData.provider == "naver",
+                PlaceRawData.provider_place_id == body.naver_place_id,
+            )
+            .first()
+        )
+        return NaverPlaceUpsertResponse(
+            place_id=raw_data.place_id,
+            created=False,
+            place=raw_data.place,
+        )
 
 
 @router.get("", response_model=list[PlaceResponse])
