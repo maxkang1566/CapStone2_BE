@@ -174,6 +174,17 @@ pyproject.toml               Poetry 의존성
   - 응답: { place_id, created: bool, place }
     - created=true: 신규 생성 / created=false: 기존 재사용
 
+- Instagram 파이프라인 정비 (방식 C 적용) — 내부 재크롤링 제거
+  - app/schemas/instagram.py: InstagramSaveRequest 완전 교체
+    - 구: url + storage_id
+    - 신: instagram_url + caption + thumbnail_url + naver_place_id(필수) + place_name + 좌표 + storage_id 등
+  - app/routers/instagram.py: save_instagram_spot 로직 교체
+    - async → def (Playwright 의존성 제거)
+    - naver_place_id 기준 Place upsert (IntegrityError → rollback → 재조회 패턴)
+    - already_saved: 같은 storage에 동일 Place Spot 존재 시 기존 Spot 반환
+    - Instagram PlaceRawData + PlaceImage 저장 유지
+  - 제거: "이름 없음" Place 자동 생성, Instagram location_id 기반 중복 감지(비인증 한계)
+
 - Instagram 장소 중복 방지 (location_id 기반 upsert) 구현
   - app/services/instagram_crawler.py: _extract_location_from_scripts() 추가
     - <script> 태그 JSON에서 "location":{"id":"...","name":"..."} 패턴 탐색

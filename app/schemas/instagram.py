@@ -9,8 +9,24 @@ class InstagramCrawlRequest(BaseModel):
 
 
 class InstagramSaveRequest(BaseModel):
-    url: HttpUrl = Field(..., description="인스타그램 게시물 URL")
-    storage_id: int | None = Field(None, description="저장할 저장소 ID (미제공 시 기본 저장소에 자동 저장)")
+    # Instagram 게시물 정보 (클라이언트가 /crawl 결과에서 전달)
+    instagram_url: HttpUrl = Field(..., description="인스타그램 게시물 URL")
+    caption: str | None = Field(None, description="게시물 캡션")
+    thumbnail_url: str | None = Field(None, description="대표 이미지 URL")
+
+    # 네이버 장소 정보 (사용자가 지도에서 선택 — 필수)
+    naver_place_id: str = Field(..., description="네이버 장소 ID")
+    place_name: str = Field(..., description="장소명")
+    place_address: str | None = None
+    latitude: float | None = Field(None, ge=-90, le=90)
+    longitude: float | None = Field(None, ge=-180, le=180)
+    category_group: str | None = None
+    place_raw_payload: dict | None = Field(None, description="네이버 SDK 원본 JSON")
+
+    # 스팟 메타데이터
+    storage_id: int | None = Field(None, description="미제공 시 기본 저장소 자동 선택")
+    user_memo: str | None = None
+    user_rating: float | None = None
 
 
 class InstagramCrawlResponse(BaseModel):
