@@ -33,3 +33,13 @@ class UserResponse(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class KakaoLoginRequest(BaseModel):
+    access_token: str  # 모바일 카카오 SDK에서 받은 access_token
+
+
+class KakaoLoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    is_new_user: bool

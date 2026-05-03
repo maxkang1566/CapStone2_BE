@@ -56,6 +56,7 @@
 [인증 - /auth]
   POST /auth/register       회원가입 (기본 저장소 자동 생성)
   POST /auth/login          로그인 (OAuth2 form data, JWT 발급)
+  POST /auth/kakao          카카오 OAuth 로그인 (모바일 SDK access_token → JWT)
 
 [사용자 - /users]
   GET  /users/me            내 정보 조회
@@ -139,14 +140,13 @@ pyproject.toml               Poetry 의존성
 ------------------------------------------------------------
  우선순위  |  항목                              |  비고
 ----------+------------------------------------+-------------------------------
- 1순위    |  카카오 OAuth 로그인                |  kakao_id 컬럼은 DB에 준비됨
- 2순위    |  공간 탐색 (반경 검색)              |  PostGIS ST_DWithin, 네이버맵 API 연동 필요
- 3순위    |  창고 멤버 초대/관리                |  storage_members 스키마 설계 완료
- 4순위    |  공개 창고 탐색/피드                |  is_public 필드 활용
- 5순위    |  장소 DNA AI 분석                   |  place_space_dna 테이블 준비됨
- 6순위    |  유저 DNA 자동 업데이트             |  방문 체크인 시 트리거, 장소 DNA 의존
- 7순위    |  Instagram location_id 인증 추출    |  쿠키 주입 또는 네이버 API 우회 방식 필요
- 8순위    |  네이버↔인스타 크로스 중복 병합     |  좌표 근접 매칭 또는 Place 병합 UI 필요
+ 1순위    |  공간 탐색 (반경 검색)              |  PostGIS ST_DWithin, 네이버맵 API 연동 필요
+ 2순위    |  창고 멤버 초대/관리                |  storage_members 스키마 설계 완료
+ 3순위    |  공개 창고 탐색/피드                |  is_public 필드 활용
+ 4순위    |  장소 DNA AI 분석                   |  place_space_dna 테이블 준비됨
+ 5순위    |  유저 DNA 자동 업데이트             |  방문 체크인 시 트리거, 장소 DNA 의존
+ 6순위    |  Instagram location_id 인증 추출    |  쿠키 주입 또는 네이버 API 우회 방식 필요
+ 7순위    |  네이버↔인스타 크로스 중복 병합     |  좌표 근접 매칭 또는 Place 병합 UI 필요
 
 
 8. 최근 수정 사항 (2026-05-03 업데이트)
@@ -203,5 +203,17 @@ pyproject.toml               Poetry 의존성
   - Playwright + 핫리로드 병행 시 greenlet 오류 발생
     → 코드 수정 후 반드시 서버 완전 재시작 필요
     → 로컬 테스트는 `poetry run uvicorn app.main:app` (핫리로드 없이) 권장
+
+- 카카오 OAuth 로그인 추가 (POST /auth/kakao)
+  - 모바일 카카오 SDK가 발급한 access_token을 받아 자체 JWT 발급
+  - app/services/kakao_oauth.py: 신규, fetch_kakao_user() — httpx로 v2/user/me 호출
+  - app/schemas/user.py: KakaoLoginRequest, KakaoLoginResponse 추가
+  - app/routers/auth.py: login_kakao() 핸들러 추가
+  - 매칭 우선순위: kakao_id → email (병합) → 신규 가입
+  - 신규 가입 시 기본 저장소("내 저장소") + owner 멤버 자동 생성 (register와 동일 패턴)
+  - 이메일 동의 X 시 kakao_{id}@picklog.local 형태로 임시 이메일 자동 생성
+  - 응답에 is_new_user 플래그 포함 (모바일 온보딩 플로우 지원)
+  - 의존성: httpx (>=0.28.0,<0.29.0) 추가
+  - 환경변수: KAKAO_REST_API_KEY (.env.example 기재, 현재 미사용)
 
 ============================================================

@@ -21,7 +21,8 @@ dependencies = [
     "email-validator (>=2.3.0,<3.0.0)",
     "alembic (>=1.18.4,<2.0.0)",
     "python-multipart (>=0.0.27,<0.0.28)",
-    "shapely (>=2.1.2,<3.0.0)"
+    "shapely (>=2.1.2,<3.0.0)",
+    "httpx (>=0.28.0,<0.29.0)"
 ]
 
 [tool.poetry]
