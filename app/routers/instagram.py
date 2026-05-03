@@ -4,13 +4,30 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
-from app.models.models import Place, PlaceImage, PlaceRawData, Spot, StorageMember, User
+from app.models.models import Place, PlaceImage, PlaceRawData, Spot, Storage, StorageMember, User
 from app.schemas.instagram import InstagramCrawlRequest, InstagramCrawlResponse, InstagramSaveRequest
 from app.schemas.spot import SpotResponse
 from app.services.instagram_crawler import InstagramCrawler
 from app.services.playwright_manager import PlaywrightManager
 
 router = APIRouter(prefix="/instagram", tags=["instagram"])
+
+
+def _get_default_storage_id(user_id: int, db: Session) -> int:
+    member = (
+        db.query(StorageMember)
+        .join(Storage, StorageMember.storage_id == Storage.id)
+        .filter(
+            StorageMember.user_id == user_id,
+            StorageMember.role == "owner",
+            Storage.deleted_at.is_(None),
+        )
+        .order_by(StorageMember.joined_at.asc())
+        .first()
+    )
+    if not member:
+        raise HTTPException(status_code=404, detail="기본 저장소를 찾을 수 없습니다.")
+    return member.storage_id
 
 
 def get_manager(request: Request) -> PlaywrightManager:
@@ -53,11 +70,13 @@ async def save_instagram_spot(
     current_user: User = Depends(get_current_user),
 ) -> SpotResponse:
     """인스타그램 게시물을 크롤링해 Place → Spot으로 저장합니다.
-    storage_id는 필수입니다.
+    storage_id 미제공 시 기본 저장소에 자동 저장합니다.
     """
+    storage_id = body.storage_id if body.storage_id is not None else _get_default_storage_id(current_user.id, db)
+
     # 창고 접근 권한 확인 (owner 또는 editor만 추가 가능)
     member = db.query(StorageMember).filter(
-        StorageMember.storage_id == body.storage_id,
+        StorageMember.storage_id == storage_id,
         StorageMember.user_id == current_user.id,
     ).first()
     if not member:
@@ -117,7 +136,7 @@ async def save_instagram_spot(
 
     # 같은 창고에 동일 장소 중복 저장 방지 (여기서는 URL로 중복 체크)
     existing = db.query(Spot).filter(
-        Spot.storage_id == body.storage_id,
+        Spot.storage_id == storage_id,
         Spot.instagram_url == url_str,
     ).first()
     if existing:
@@ -126,7 +145,7 @@ async def save_instagram_spot(
     # Spot 생성
     thumbnail = result.images[0] if result.images else None
     spot = Spot(
-        storage_id=body.storage_id,
+        storage_id=storage_id,
         place_id=place.id,
         added_by=current_user.id,
         instagram_url=url_str,

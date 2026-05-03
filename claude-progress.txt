@@ -140,14 +140,15 @@ pyproject.toml               Poetry 의존성
  우선순위  |  항목                    |  비고
 ----------+--------------------------+-------------------------------
  1순위    |  카카오 OAuth 로그인      |  kakao_id 컬럼은 DB에 준비됨
- 2순위    |  공간 탐색 (반경 검색)    |  PostGIS ST_DWithin, 카카오맵 API 연동 필요
+ 2순위    |  공간 탐색 (반경 검색)    |  PostGIS ST_DWithin, 네이버맵 API 연동 필요
  3순위    |  창고 멤버 초대/관리      |  storage_members 스키마 설계 완료
  4순위    |  공개 창고 탐색/피드      |  is_public 필드 활용
  5순위    |  장소 DNA AI 분석         |  place_space_dna 테이블 준비됨
  6순위    |  유저 DNA 자동 업데이트   |  방문 체크인 시 트리거, 장소 DNA 의존
+ 7순위    |  네이버 지도 추가 필드    |  naver_place_id 기준 place_images 자동 저장 등
 
 
-8. 최근 수정 사항 (2026-05-02)
+8. 최근 수정 사항 (2026-05-02 업데이트)
 ------------------------------------------------------------
 [2026-05-01]
 - OAuth2 인증 방식 수정: JSON body -> OAuth2PasswordRequestForm (Swagger 호환)
@@ -173,5 +174,24 @@ pyproject.toml               Poetry 의존성
   - 구현: Pydantic v2 computed_field + geoalchemy2.shape.to_shape() 활용
   - DB Geometry 컬럼은 그대로 유지 (PostGIS ST_DWithin 반경 검색 대비)
   - 의존성 추가: shapely 2.1.2 (geoalchemy2 shape 변환에 필요)
+- 네이버 지도 기반 장소 Upsert (POST /places/from-naver) 추가
+  - NaverPlaceUpsertRequest: naver_place_id(필수), name, address, lat/lng, category_group, phone, homepage_url, raw_payload
+  - NaverPlaceUpsertResponse: place_id, created(신규여부), place(PlaceResponse)
+  - 로직: PlaceRawData(provider='naver', provider_place_id) 조회 → 있으면 재사용, 없으면 Place+PlaceRawData INSERT
+  - IntegrityError 동시 요청 충돌 처리: rollback 후 재조회
+  - WKTElement로 위도/경도 → PostGIS POINT 변환
+  - Alembic 마이그레이션 (a3f8b2c1d947): place_raw_data partial unique index 추가
+    uq_place_raw_data_provider_pid (provider, provider_place_id) WHERE provider_place_id IS NOT NULL
+  - PlaceRawData 모델에 __table_args__ 추가 (모델-DB 동기화)
+  - 검증 시나리오 5개 모두 통과
+
+[2026-05-03]
+- API 명세서 추가: docs/API_SPECIFICATION.md (구현 엔드포인트·스키마·인증·오류 코드 정리)
+- notes/2026-05-03_api_specification.md 작업 메모
+- Instagram 공유 → 기본 저장소 자동 저장 기능 구현
+  - app/schemas/instagram.py: InstagramSaveRequest.storage_id를 Optional[int]로 변경
+  - app/routers/instagram.py: _get_default_storage_id() 헬퍼 추가, /save 엔드포인트 수정
+  - 기본 저장소 = role='owner' + deleted_at IS NULL + joined_at ASC 첫 번째 저장소
+  - 기존 storage_id 명시 호출과 완전 하위 호환 유지
 
 ============================================================

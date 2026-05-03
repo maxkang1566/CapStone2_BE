@@ -21,6 +21,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Define the next immediate steps for the project.
 - Ensure the progress log is concise and reflects the latest changes in the codebase.
 
+- 모든 작업에 대해 notes/ 디렉토리에 메모를 남겨줘
+- 메모에는 : 작업 내용, 결정 이유, 배운 점을 포함
+- 중요한 결정의 이유(WHY)를 반드시 기록
+
 ## Commands
 
 ```bash

@@ -8,7 +8,7 @@ class InstagramCrawlRequest(BaseModel):
 
 class InstagramSaveRequest(BaseModel):
     url: HttpUrl = Field(..., description="인스타그램 게시물 URL")
-    storage_id: int = Field(..., description="저장할 저장소 ID")
+    storage_id: int | None = Field(None, description="저장할 저장소 ID (미제공 시 기본 저장소에 자동 저장)")
 
 
 class InstagramCrawlResponse(BaseModel):
