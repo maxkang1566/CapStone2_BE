@@ -270,6 +270,55 @@ class UserSpaceDNAHistory(Base):
     user: Mapped[User] = relationship("User", back_populates="dna_history")
 
 
+class InstagramPostCache(Base):
+    """Apify(또는 OG fallback)로 가져온 인스타 게시물 응답을 shortcode 단위로 캐싱한다.
+    같은 게시물을 여러 사용자가 공유해도 외부 호출은 1번만 일어나도록 보장한다."""
+    __tablename__ = "instagram_post_cache"
+
+    shortcode: Mapped[str] = mapped_column(String, primary_key=True)
+    url: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)  # 'apify' | 'og_fallback'
+    fetched_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+
+
+class InstagramCrawlJob(Base):
+    """비동기 크롤링/공유 작업 상태/결과. 클라이언트가 폴링으로 진행 상황을 확인한다.
+
+    `kind`로 작업 종류 구분:
+      - 'crawl': /instagram/crawl-async — payload에 InstagramCrawlResponse 직렬화
+      - 'share': /instagram/share — payload에 InstagramShareResponse 직렬화,
+                 user_id/storage_id로 워커가 share_post를 재구성할 컨텍스트 전달
+    """
+    __tablename__ = "instagram_crawl_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # UUID 문자열
+    kind: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="crawl"
+    )  # 'crawl' | 'share'
+    url: Mapped[str] = mapped_column(String, nullable=False)
+    shortcode: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)  # 'pending' | 'done' | 'failed'
+    source: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 'apify' | 'og_fallback' | None
+    # share 잡 한정: 워커가 share_post를 재구성할 인증/저장소 컨텍스트
+    user_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    storage_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("storages.id", ondelete="SET NULL"), nullable=True
+    )
+    payload: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        Index("ix_instagram_crawl_jobs_created_at", "created_at"),
+        Index("ix_instagram_crawl_jobs_source_created", "source", "created_at"),
+        Index("ix_instagram_crawl_jobs_kind_created", "kind", "created_at"),
+    )
+
+
 class PlaceReview(Base):
     __tablename__ = "place_reviews"
 

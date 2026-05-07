@@ -1,17 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from geoalchemy2.elements import WKTElement
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
-from app.models.models import Place, PlaceRawData, User
+from app.models.models import Place, PlaceRawData, PlaceReview, User
 from app.schemas.place import (
     NaverPlaceUpsertRequest,
     NaverPlaceUpsertResponse,
     PlaceRawDataResponse,
     PlaceResponse,
+    PlaceReviewResponse,
 )
+from app.services.naver_blog import collect_reviews_for_place
 
 router = APIRouter(prefix="/places", tags=["places"])
 
@@ -19,6 +21,7 @@ router = APIRouter(prefix="/places", tags=["places"])
 @router.post("/from-naver", response_model=NaverPlaceUpsertResponse, status_code=200)
 def upsert_place_from_naver(
     body: NaverPlaceUpsertRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -63,6 +66,14 @@ def upsert_place_from_naver(
         db.add(raw_data)
         db.commit()
         db.refresh(place)
+
+        query = f"{body.name} {body.address}".strip() if body.address else body.name
+        background_tasks.add_task(
+            collect_reviews_for_place,
+            place.id,
+            query,
+            raw_data.id,
+        )
         return NaverPlaceUpsertResponse(place_id=place.id, created=True, place=place)
 
     except IntegrityError:
@@ -127,5 +138,27 @@ def get_place_raw_data(
         db.query(PlaceRawData)
         .filter(PlaceRawData.place_id == place_id)
         .order_by(PlaceRawData.collected_at.desc())
+        .all()
+    )
+
+
+@router.get("/{place_id}/reviews", response_model=list[PlaceReviewResponse])
+def get_place_reviews(
+    place_id: int,
+    page: int = Query(1, ge=1, description="페이지 번호"),
+    size: int = Query(20, ge=1, le=100, description="페이지당 항목 수"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """특정 장소에 수집된 리뷰(네이버 블로그 등) 목록을 반환합니다."""
+    place = db.query(Place).filter(Place.id == place_id).first()
+    if not place:
+        raise HTTPException(status_code=404, detail="장소를 찾을 수 없습니다.")
+    return (
+        db.query(PlaceReview)
+        .filter(PlaceReview.place_id == place_id)
+        .order_by(PlaceReview.collected_at.desc())
+        .offset((page - 1) * size)
+        .limit(size)
         .all()
     )

@@ -1,20 +1,42 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 import anyio
-from geoalchemy2.elements import WKTElement
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
-from app.models.models import Place, PlaceImage, PlaceRawData, Spot, Storage, StorageMember, User
+from app.models.models import (
+    InstagramCrawlJob,
+    Storage,
+    StorageMember,
+    User,
+)
 from app.schemas.instagram import (
+    InstagramCrawlJobEnqueueResponse,
     InstagramCrawlRequest,
     InstagramCrawlResponse,
+    InstagramJobStatusResponse,
     InstagramSaveRequest,
     InstagramSaveResponse,
+    InstagramShareEnqueueResponse,
+    InstagramShareJobStatusResponse,
+    InstagramShareRequest,
+    InstagramShareResponse,
 )
+from app.services import instagram_pipeline, instagram_share
 from app.services.instagram_crawler import InstagramCrawler
+from app.services.naver_local_search import NaverLocalSearchError
 from app.services.playwright_manager import PlaywrightManager
+from app.services.spot_creator import (
+    DuplicateInstagramUrlError,
+    InstagramData,
+    NaverPlaceData,
+    SpotCreationError,
+    StorageNotFoundError,
+    StoragePermissionError,
+    create_spot_from_naver,
+)
 
 router = APIRouter(prefix="/instagram", tags=["instagram"])
 
@@ -82,115 +104,239 @@ def save_instagram_spot(
     """
     storage_id = body.storage_id if body.storage_id is not None else _get_default_storage_id(current_user.id, db)
 
-    # 창고 접근 권한 확인 (owner 또는 editor만 추가 가능)
-    member = db.query(StorageMember).filter(
-        StorageMember.storage_id == storage_id,
-        StorageMember.user_id == current_user.id,
-    ).first()
-    if not member:
-        raise HTTPException(status_code=404, detail="저장소를 찾을 수 없습니다.")
-    if member.role not in ("owner", "editor"):
-        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
-
-    # 같은 게시물 URL 중복 저장 방지
-    instagram_url_str = str(body.instagram_url)
-    if db.query(Spot).filter(Spot.storage_id == storage_id, Spot.instagram_url == instagram_url_str).first():
-        raise HTTPException(status_code=409, detail="이미 저장된 게시물입니다.")
-
-    # 네이버 장소 upsert (naver_place_id 기준)
-    place_created = False
-    existing_raw = (
-        db.query(PlaceRawData)
-        .filter(
-            PlaceRawData.provider == "naver",
-            PlaceRawData.provider_place_id == body.naver_place_id,
-        )
-        .first()
+    naver = NaverPlaceData(
+        naver_place_id=body.naver_place_id,
+        name=body.place_name,
+        address=body.place_address,
+        latitude=body.latitude,
+        longitude=body.longitude,
+        category_group=body.category_group,
+        raw_payload=body.place_raw_payload,
     )
-    if existing_raw:
-        place = db.query(Place).filter(Place.id == existing_raw.place_id).first()
-    else:
-        coordinate = None
-        if body.latitude is not None and body.longitude is not None:
-            coordinate = WKTElement(f"POINT({body.longitude} {body.latitude})", srid=4326)
-        try:
-            place = Place(
-                name=body.place_name,
-                address=body.place_address,
-                coordinate=coordinate,
-                category_group=body.category_group,
-            )
-            db.add(place)
-            db.flush()
-            db.add(PlaceRawData(
-                place_id=place.id,
-                provider="naver",
-                provider_place_id=body.naver_place_id,
-                raw_payload=body.place_raw_payload,
-            ))
-            db.flush()
-            place_created = True
-        except IntegrityError:
-            db.rollback()
-            existing_raw = (
-                db.query(PlaceRawData)
-                .filter(
-                    PlaceRawData.provider == "naver",
-                    PlaceRawData.provider_place_id == body.naver_place_id,
-                )
-                .first()
-            )
-            place = db.query(Place).filter(Place.id == existing_raw.place_id).first()
-
-    # 이 storage에 동일 Place Spot이 이미 있는지 확인
-    existing_spot = (
-        db.query(Spot)
-        .filter(
-            Spot.storage_id == storage_id,
-            Spot.place_id == place.id,
-            Spot.deleted_at.is_(None),
-        )
-        .first()
-    )
-    if existing_spot:
-        return InstagramSaveResponse(spot=existing_spot, already_saved=True, place_created=False)
-
-    # Instagram 게시물 데이터 보관 (캡션/이미지 원본)
-    db.add(PlaceRawData(
-        place_id=place.id,
-        provider="instagram",
-        provider_place_id=None,
-        raw_payload={
-            "url": instagram_url_str,
-            "caption": body.caption,
-            "thumbnail_url": body.thumbnail_url,
-        },
-    ))
-
-    # 썸네일 이미지 저장
-    if body.thumbnail_url:
-        db.add(PlaceImage(
-            place_id=place.id,
-            image_url=body.thumbnail_url,
-            source="instagram",
-            is_representative=True,
-        ))
-
-    # Spot 생성
-    spot = Spot(
-        storage_id=storage_id,
-        place_id=place.id,
-        added_by=current_user.id,
-        instagram_url=instagram_url_str,
+    instagram = InstagramData(
+        url=str(body.instagram_url),
+        caption=body.caption,
         thumbnail_url=body.thumbnail_url,
         user_memo=body.user_memo,
         user_rating=body.user_rating,
     )
-    db.add(spot)
     try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="이미 저장된 장소입니다.")
-    db.refresh(spot)
-    return InstagramSaveResponse(spot=spot, already_saved=False, place_created=place_created)
+        result = create_spot_from_naver(naver, instagram, storage_id, current_user, db)
+    except StorageNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except StoragePermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except DuplicateInstagramUrlError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except SpotCreationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return InstagramSaveResponse(
+        spot=result.spot,
+        already_saved=result.already_saved,
+        place_created=result.place_created,
+    )
+
+
+def _get_rq_queue(request: Request):
+    """앱 라이프사이클에 등록된 RQ 큐를 반환한다."""
+    queue = getattr(request.app.state, "instagram_queue", None)
+    if queue is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="작업 큐가 초기화되지 않았습니다 (Redis 연결을 확인해주세요).",
+        )
+    return queue
+
+
+@router.post("/crawl-async", response_model=InstagramCrawlJobEnqueueResponse)
+def crawl_instagram_async(
+    body: InstagramCrawlRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> InstagramCrawlJobEnqueueResponse:
+    """비동기 인스타 크롤링 진입점.
+
+    - 캐시 hit이면 즉시 결과 반환(잡 생성 없음)
+    - miss면 InstagramCrawlJob 행을 만들고 RQ 큐에 enqueue → job_id 반환
+    """
+    url = str(body.url)
+    shortcode = instagram_pipeline.extract_shortcode(url)
+    if not shortcode:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="인스타그램 게시물 URL 형식이 아닙니다.",
+        )
+
+    # 1) 캐시 hit이면 잡 생성 없이 즉시 응답
+    cached = instagram_pipeline.get_cached(db, shortcode)
+    if cached:
+        if cached.source == "apify":
+            response = instagram_pipeline._normalize_apify(url, cached.payload)
+        else:
+            response = instagram_pipeline._normalize_og(url, cached.payload)
+        return InstagramCrawlJobEnqueueResponse(job_id=None, status="done", result=response)
+
+    # 2) 잡 생성 + 큐 enqueue
+    job_id = str(uuid.uuid4())
+    db.add(InstagramCrawlJob(
+        id=job_id,
+        kind="crawl",
+        url=url,
+        shortcode=shortcode,
+        status="pending",
+    ))
+    db.commit()
+
+    queue = _get_rq_queue(request)
+    queue.enqueue(
+        "app.services.instagram_jobs.process_crawl_job",
+        job_id,
+        job_id=job_id,
+        job_timeout=180,
+    )
+
+    return InstagramCrawlJobEnqueueResponse(job_id=job_id, status="pending", result=None)
+
+
+@router.get("/jobs/{job_id}", response_model=InstagramJobStatusResponse)
+def get_instagram_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+) -> InstagramJobStatusResponse:
+    """비동기 크롤링 잡의 진행 상황과 결과를 조회한다.
+
+    kind='crawl' 잡만 응답. share 잡은 /instagram/share-jobs/{id}로 분리.
+    """
+    job = (
+        db.query(InstagramCrawlJob)
+        .filter(InstagramCrawlJob.id == job_id, InstagramCrawlJob.kind == "crawl")
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="잡을 찾을 수 없습니다.")
+
+    result: InstagramCrawlResponse | None = None
+    if job.status == "done" and job.payload:
+        result = InstagramCrawlResponse.model_validate(job.payload)
+
+    return InstagramJobStatusResponse(
+        job_id=job.id,
+        status=job.status,
+        source=job.source,
+        result=result,
+        error=job.error,
+    )
+
+
+@router.post("/share", response_model=InstagramShareEnqueueResponse)
+def share_instagram_post(
+    body: InstagramShareRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> InstagramShareEnqueueResponse:
+    """인스타 게시물 공유 진입점 (하이브리드 sync/async).
+
+    - 캐시 hit: 즉시 share_post 실행 → status="done", result에 InstagramShareResponse
+    - 캐시 miss: 잡 등록 → status="pending", job_id 반환.
+      클라이언트는 GET /instagram/share-jobs/{job_id}로 폴링.
+
+    Apify 호출(5~30초)이 필요한 경우만 비동기로 빠지므로, 같은 URL 재공유나 다른 사용자가
+    이미 본 URL은 즉시 응답된다.
+    """
+    url = str(body.url)
+    shortcode = instagram_pipeline.extract_shortcode(url)
+    if not shortcode:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="인스타그램 게시물 URL 형식이 아닙니다.",
+        )
+
+    storage_id = (
+        body.storage_id
+        if body.storage_id is not None
+        else _get_default_storage_id(current_user.id, db)
+    )
+
+    # 1) 캐시 hit이면 동기 처리(외부 호출 없음, 1~2초)
+    if instagram_pipeline.get_cached(db, shortcode) is not None:
+        manager = getattr(request.app.state, "playwright_manager", None)
+        try:
+            result = instagram_share.share_post(
+                url, storage_id, current_user, db, playwright_manager=manager
+            )
+        except StorageNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except StoragePermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e)) from e
+        except DuplicateInstagramUrlError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except SpotCreationError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except instagram_pipeline.PipelineError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except NaverLocalSearchError as e:
+            # 외부(네이버 Local Search) 의존성 실패는 빈 결과로 위장하지 않고 502로 명시 거절.
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"네이버 장소 검색에 실패했습니다: {e}",
+            ) from e
+
+        response = instagram_share.share_result_to_response(result)
+        return InstagramShareEnqueueResponse(job_id=None, status="done", result=response)
+
+    # 2) 캐시 miss → 잡 등록 + 큐 enqueue
+    job_id = str(uuid.uuid4())
+    db.add(InstagramCrawlJob(
+        id=job_id,
+        kind="share",
+        url=url,
+        shortcode=shortcode,
+        status="pending",
+        user_id=current_user.id,
+        storage_id=storage_id,
+    ))
+    db.commit()
+
+    queue = _get_rq_queue(request)
+    queue.enqueue(
+        "app.services.instagram_jobs.process_share_job",
+        job_id,
+        job_id=job_id,
+        job_timeout=180,
+    )
+
+    return InstagramShareEnqueueResponse(job_id=job_id, status="pending", result=None)
+
+
+@router.get("/share-jobs/{job_id}", response_model=InstagramShareJobStatusResponse)
+def get_instagram_share_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> InstagramShareJobStatusResponse:
+    """share 잡의 진행 상황과 결과를 조회한다.
+
+    kind 필터로 crawl 잡과 분리. 잡 등록자(user_id)만 본인 잡을 조회 가능.
+    """
+    job = (
+        db.query(InstagramCrawlJob)
+        .filter(InstagramCrawlJob.id == job_id, InstagramCrawlJob.kind == "share")
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="잡을 찾을 수 없습니다.")
+    if job.user_id is not None and job.user_id != current_user.id:
+        # 다른 사용자의 잡 조회는 차단 (정보 누출 방지). 404로 응답해 잡 존재 여부도 가림.
+        raise HTTPException(status_code=404, detail="잡을 찾을 수 없습니다.")
+
+    result: InstagramShareResponse | None = None
+    if job.status == "done" and job.payload:
+        result = InstagramShareResponse.model_validate(job.payload)
+
+    return InstagramShareJobStatusResponse(
+        job_id=job.id,
+        status=job.status,
+        result=result,
+        error=job.error,
+    )

@@ -22,7 +22,9 @@ dependencies = [
     "alembic (>=1.18.4,<2.0.0)",
     "python-multipart (>=0.0.27,<0.0.28)",
     "shapely (>=2.1.2,<3.0.0)",
-    "httpx (>=0.28.0,<0.29.0)"
+    "httpx (>=0.28.0,<0.29.0)",
+    "apify-client (>=1.8.0,<2.0.0)",
+    "rq (>=2.0.0,<3.0.0)"
 ]
 
 [tool.poetry]

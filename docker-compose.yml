@@ -23,6 +23,24 @@ services:
     ports:
       - "6379:6379"
 
+  # 🛠️ RQ 워커: Apify 호출 + OG fallback 크롤링을 비동기로 처리합니다.
+  # 별도 실행이 필요한 경우(로컬 디버깅 등)에는 docker-compose --profile worker up 사용.
+  worker:
+    profiles: ["worker"]
+    build: .
+    container_name: picklog-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      APIFY_TOKEN: ${APIFY_TOKEN}
+      APIFY_INSTAGRAM_ACTOR_ID: ${APIFY_INSTAGRAM_ACTOR_ID:-apify/instagram-scraper}
+      APIFY_MONTHLY_BUDGET_USD: ${APIFY_MONTHLY_BUDGET_USD:-50}
+    depends_on:
+      - db
+      - redis
+
 # 데이터를 컴퓨터에 저장해서 컨테이너를 껏다 켜도 유지되게 합니다.
 volumes:
   postgres_data:

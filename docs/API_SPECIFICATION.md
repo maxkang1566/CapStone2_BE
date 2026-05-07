@@ -15,10 +15,10 @@ OpenAPI(Swagger) UI는 서버 루트 기준 `/docs` 에서 동일 내용을 대�
 | 항목 | 내용 |
 |------|------|
 | 방식 | JWT Bearer (`Authorization: Bearer <access_token>`) |
-| 토큰 발급 | `POST /auth/login` (OAuth2 Password Grant 형식의 폼 데이터) |
+| 토큰 발급 | `POST /auth/login` (OAuth2 Password Grant 형식의 폼 데이터) 또는 `POST /auth/kakao` (모바일 카카오 SDK access_token 전달) |
 | 보호 엔드포인트 | 아래 각 API 표에 **인증** 열 참고 |
 
-OAuth2PasswordBearer의 `tokenUrl`은 `/auth/login` 입니다.
+OAuth2PasswordBearer의 `tokenUrl`은 `/auth/login` 입니다. 카카오 로그인으로 발급받은 토큰도 동일하게 `Authorization: Bearer <access_token>` 헤더로 사용합니다.
 
 ### 오류 응답 형식
 
@@ -51,6 +51,7 @@ FastAPI 기본: HTTP 상태 코드와 함께 JSON 본문에 `detail` 필드(문�
 |--------|------|------|------|
 | POST | `/auth/register` | 불필요 | 회원가입. 기본 저장소(`내 저장소`) 및 소유자 멤버 자동 생성 |
 | POST | `/auth/login` | 불필요 | 로그인. 액세스 토큰 발급 |
+| POST | `/auth/kakao` | 불필요 | 카카오 OAuth 로그인. 모바일 SDK access_token으로 자체 JWT 발급 |
 
 #### POST `/auth/register`
 
@@ -88,6 +89,40 @@ FastAPI 기본: HTTP 상태 코드와 함께 JSON 본문에 `detail` 필드(문�
 ```
 
 **오류:** `401` — 이메일 또는 비밀번호 불일치
+
+#### POST `/auth/kakao`
+
+**Content-Type:** `application/json`
+
+모바일 클라이언트가 카카오 SDK로 받은 `access_token`을 그대로 전달하면, 백엔드가 카카오 사용자 정보를 조회해 자체 JWT를 발급합니다. 백엔드는 OAuth code → token 교환을 수행하지 않습니다.
+
+**요청 본문 (`KakaoLoginRequest`)**
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|------|------|
+| `access_token` | string | 예 | 모바일 카카오 SDK가 발급한 access_token |
+
+**응답:** `200 OK` — `KakaoLoginResponse`
+
+| 필드 | 타입 | 설명 |
+|------|------|------|
+| `access_token` | string | 백엔드가 발급한 JWT |
+| `token_type` | string | 항상 `"bearer"` |
+| `is_new_user` | boolean | 이번 호출에서 신규 가입이 발생했는지 여부 |
+
+**동작**
+
+1. **kakao_id 매칭** — 동일 `kakao_id`의 기존 사용자가 있으면 그대로 로그인.
+2. **email 매칭(계정 병합)** — 위에서 못 찾고, 카카오에서 받은 이메일과 동일한 기존 사용자가 있으면 그 사용자에 `kakao_id`를 연결한 뒤 로그인.
+3. **신규 가입** — 둘 다 없으면 새 사용자 생성 + 기본 저장소(`내 저장소`) 및 소유자 멤버 자동 등록 (`/auth/register`와 동일 패턴). 카카오 닉네임/프로필 이미지가 있으면 함께 저장.
+4. **이메일 동의 미수신** — 카카오 동의 화면에서 사용자가 이메일을 거절한 경우 `kakao_{kakao_id}@picklog.local` 형식의 임시 이메일을 자동 부여합니다. 이후 사용자가 프로필 수정으로 변경 가능합니다.
+
+**오류**
+
+| 코드 | 조건 |
+|------|------|
+| `401` | 카카오 토큰이 유효하지 않음 (`detail`: 한글 메시지) |
+| `502` | 카카오 서버 연결 실패 또는 사용자 정보 조회 실패 |
 
 ---
 
@@ -301,8 +336,11 @@ FastAPI 기본: HTTP 상태 코드와 함께 JSON 본문에 `detail` 필드(문�
 | `caption` | string \| null |
 | `images` | string[] |
 | `location_name` | string \| null |
+| `instagram_location_id` | string \| null |
 | `og_title` | string \| null |
 | `og_description` | string \| null |
+
+**비고:** `instagram_location_id`는 게시물 내 `<script>` 태그 JSON에서 위치 태그 ID를 추출한 값입니다. 비로그인 상태에서는 인스타그램이 해당 데이터를 숨기는 경우가 많아 `null`로 올 수 있습니다.
 
 **오류**
 
@@ -315,24 +353,49 @@ FastAPI 기본: HTTP 상태 코드와 함께 JSON 본문에 `detail` 필드(문�
 
 #### POST `/instagram/save`
 
+클라이언트가 `/instagram/crawl` 결과(캡션·썸네일)와 네이버 지도에서 선택한 장소 정보를 함께 전달하면, 서버가 한 번의 호출로 Place upsert + Spot 저장을 처리합니다. 서버는 추가로 인스타그램을 재크롤링하지 않습니다(방식 C).
+
 **요청 본문 (`InstagramSaveRequest`)**
 
-| 필드 | 타입 | 필수 |
+| 필드 | 타입 | 필수 | 제약/설명 |
+|------|------|------|-----------|
+| `instagram_url` | string (URL) | 예 | 인스타그램 게시물 URL |
+| `caption` | string \| null | 아니오 | 게시물 캡션 (`/crawl`에서 받은 값) |
+| `thumbnail_url` | string \| null | 아니오 | 대표 이미지 URL (`/crawl`에서 받은 값) |
+| `naver_place_id` | string | 예 | 네이버 장소 ID (`PlaceRawData.provider_place_id`와 매칭) |
+| `place_name` | string | 예 | 장소명 |
+| `place_address` | string \| null | 아니오 | |
+| `latitude` | number \| null | 아니오 | -90 ~ 90, `longitude`와 함께 있으면 PostGIS POINT 저장 |
+| `longitude` | number \| null | 아니오 | -180 ~ 180 |
+| `category_group` | string \| null | 아니오 | |
+| `place_raw_payload` | object \| null | 아니오 | 네이버 SDK 원본 JSON |
+| `storage_id` | integer \| null | 아니오 | 미제공 시 요청자의 기본 저장소(가장 먼저 owner가 된 저장소)로 자동 저장 |
+| `user_memo` | string \| null | 아니오 | |
+| `user_rating` | number \| null | 아니오 | |
+
+**권한:** 대상 저장소의 **owner 또는 editor**
+
+**동작**
+
+1. `storage_id` 미제공 시 요청자의 기본 저장소를 자동 선택합니다.
+2. 동일 `storage_id` + `instagram_url` 조합이 이미 있으면 `409`로 거절합니다.
+3. `naver_place_id` 기준으로 Place를 찾거나 새로 생성합니다 (`PlaceRawData(provider="naver", provider_place_id=naver_place_id)`로 매칭). 동시성 충돌(`IntegrityError`) 시 롤백 후 재조회.
+4. 같은 저장소에 동일 Place의 Spot이 이미 있으면 새로 만들지 않고 기존 Spot을 반환하면서 `already_saved=true`로 표시합니다.
+
+**응답:** `201 Created` — `InstagramSaveResponse`
+
+| 필드 | 타입 | 설명 |
 |------|------|------|
-| `url` | string (URL) | 예 |
-| `storage_id` | integer | 예 |
-
-**권한:** 해당 저장소의 **owner 또는 editor**
-
-**응답:** `201 Created` — `SpotResponse`
+| `spot` | SpotResponse | 신규 또는 기존 Spot |
+| `already_saved` | boolean | 동일 저장소·장소에 이미 Spot이 있었는지 여부 |
+| `place_created` | boolean | 이번 호출에서 새로 Place가 생성됐는지 여부 |
 
 **오류**
 
 | 코드 | 조건 |
 |------|------|
-| `404` | 저장소 없음(멤버 아님) 또는 게시물 메타 비어 있음 |
+| `404` | 대상 저장소 없음/멤버 아님, 또는 `storage_id` 미제공 시 기본 저장소 미존재 |
 | `403` | viewer 등 저장 권한 없음 |
-| `400` / `504` | 크롤링 단계와 동일 |
 | `409` | 동일 저장소에 동일 `instagram_url` 이미 존재 |
 
 ---
@@ -415,16 +478,35 @@ FastAPI 기본: HTTP 상태 코드와 함께 JSON 본문에 `detail` 필드(문�
 | `raw_payload` | object \| null |
 | `collected_at` | datetime |
 
+### KakaoLoginResponse
+
+| 필드 | 타입 |
+|------|------|
+| `access_token` | string |
+| `token_type` | string (`"bearer"`) |
+| `is_new_user` | boolean |
+
+### InstagramSaveResponse
+
+| 필드 | 타입 | 설명 |
+|------|------|------|
+| `spot` | SpotResponse | 신규 또는 기존 Spot |
+| `already_saved` | boolean | 동일 저장소·장소에 이미 Spot이 있었는지 |
+| `place_created` | boolean | 이번 호출에서 새 Place가 생성됐는지 |
+
 ---
 
 ## 미노출 사항
 
 - DB에 `place_reviews` 등이 있어도, 현재 **리뷰 조회/작성 HTTP API는 구현되어 있지 않습니다** (`PlaceReviewResponse`는 스키마만 존재).
 - API 경로에 버전 접두사(` /v1` 등)는 없습니다.
+- 카카오 로그인은 **모바일 SDK access_token 방식**만 지원합니다. 백엔드는 OAuth code → token 교환을 수행하지 않으므로 `KAKAO_CLIENT_SECRET` / `KAKAO_REDIRECT_URI` 환경변수는 사용하지 않습니다 (`KAKAO_REST_API_KEY`만 정의되어 있으며 현재 호출 경로에서는 사용되지 않습니다).
+- 공간 탐색(반경 검색), 창고 멤버 초대/관리, 공개 창고 피드, 장소 DNA 조회 API는 아직 구현되어 있지 않습니다.
 
 ---
 
 ## 문서 정합성
 
-- 코드 기준 최종 갱신: 앱 라우터 및 Pydantic 스키마와 대조하여 작성되었습니다.
+- 코드 기준 최종 갱신: **2026-05-04** — `POST /auth/kakao` 추가, `POST /instagram/save` 방식 C(요청·응답 스키마 전면 교체) 반영, `InstagramCrawlResponse.instagram_location_id` 필드 보완.
+- 앱 라우터 및 Pydantic 스키마와 대조하여 작성되었습니다.
 - 상세 필드·예시는 `/docs` 의 OpenAPI 스키마를 기준으로 삼는 것이 가장 정확합니다.

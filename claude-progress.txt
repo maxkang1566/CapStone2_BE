@@ -31,6 +31,8 @@
 
 3. DB 스키마 (완료 - 12개 테이블)
 ------------------------------------------------------------
+  instagram_post_cache    - Apify/OG fallback 응답 shortcode 단위 캐시 (URL 재요청 시 재호출 방지)
+  instagram_crawl_jobs    - 비동기 크롤링 잡 상태/결과 (id, status, source, payload, error)
   users              - 사용자 (email, password, kakao_id, nickname, profile_image)
   storages           - 저장소/창고 (title, description, is_public, deleted_at)
   storage_members    - 저장소 멤버 (storage_id, user_id, role: owner/editor/viewer)
@@ -81,8 +83,11 @@
   GET  /places/{id}                  장소 상세 조회
 
 [인스타그램 - /instagram]
-  POST /instagram/crawl      URL 크롤링 (OG 메타 기반 캡션/이미지/위치 추출)
-  POST /instagram/save       크롤링 + 저장 (Place -> PlaceRawData -> PlaceImage -> Spot)
+  POST /instagram/crawl         URL 크롤링 (OG 메타, 동기 - 레거시 유지)
+  POST /instagram/crawl-async   Apify 기반 크롤링 (비동기 큐, 캐시 hit 시 즉시 반환)
+  GET  /instagram/jobs/{id}     비동기 잡 상태/결과 조회
+  POST /instagram/share         자동 매핑 + 저장 (캡션 → 후보 추출 → 네이버 검색 → 유니크 1건이면 자동 저장, 그 외 후보 반환)
+  POST /instagram/save          크롤링 + 저장 (Place -> PlaceRawData -> PlaceImage -> Spot, 수동 폴백 경로 포함)
 
 [헬스체크 - /health]
   GET  /health/db            DB 연결 상태 확인
@@ -126,8 +131,17 @@ app/
     instagram.py             인스타그램 크롤링/저장
     health.py                헬스체크
   services/
-    instagram_crawler.py     Playwright 기반 크롤링 로직
+    instagram_crawler.py     Playwright 기반 크롤링 로직 (OG fallback)
     playwright_manager.py    브라우저 싱글톤 관리
+    apify_client.py          Apify 액터 호출 래퍼
+    instagram_pipeline.py    캐시 → Apify → OG fallback 통합 파이프라인
+    instagram_jobs.py        RQ 잡 함수 (process_crawl_job)
+    instagram_share.py       /share 자동 매핑 + 저장 오케스트레이션
+    naver_local_search.py    Naver Local Search Open API 래퍼
+    place_extractor.py       캡션 → 장소 후보 텍스트 추출 (정규식·휴리스틱)
+    spot_creator.py          Place upsert + Spot 생성 공용 로직 (/save · /share 공통)
+    naver_blog.py            네이버 블로그 검색 + 본문 추출 (PlaceReview 수집)
+    kakao_oauth.py           카카오 OAuth 사용자 정보 조회
 
 Dockerfile                   Railway 배포용 (Playwright Chromium 포함)
 docker-compose.yml           로컬 개발용 (PostgreSQL + Redis)
@@ -215,5 +229,93 @@ pyproject.toml               Poetry 의존성
   - 응답에 is_new_user 플래그 포함 (모바일 온보딩 플로우 지원)
   - 의존성: httpx (>=0.28.0,<0.29.0) 추가
   - 환경변수: KAKAO_REST_API_KEY (.env.example 기재, 현재 미사용)
+
+[2026-05-07 — Phase 2: /share 비동기화 + 비용 가드 통합]
+- POST /instagram/share를 하이브리드 sync/async로 변경
+  - 캐시 hit: 즉시 share_post 동기 실행 → status="done", result=InstagramShareResponse
+  - 캐시 miss: instagram_crawl_jobs 행 생성 + RQ enqueue → status="pending", job_id 반환
+  - /crawl-async와 동일한 enqueue 응답 패턴 (InstagramShareEnqueueResponse)
+  - 응답 모델 변경: 기존 InstagramShareResponse 직접 반환 → InstagramShareEnqueueResponse
+    (기존 클라이언트는 status="done" 분기에서 result 필드 안의 InstagramShareResponse를 꺼내 사용)
+- GET /instagram/share-jobs/{job_id} 신규 (share 잡 폴링)
+  - kind='share' 필터로 crawl 잡과 분리
+  - 잡 등록자(user_id)만 조회 가능 (다른 사용자 잡은 404로 가림)
+- 기존 /jobs/{id}는 kind='crawl' 필터 추가해 crawl 잡만 응답
+- instagram_crawl_jobs 스키마 확장 (Alembic: c8d3e5f1a934)
+  - kind: 'crawl' | 'share' (server_default='crawl', NOT NULL)
+  - user_id, storage_id (share 잡 한정 nullable, FK with ondelete=SET NULL)
+  - 인덱스 추가: ix_instagram_crawl_jobs_kind_created
+- 워커 함수 신규: app/services/instagram_jobs.process_share_job
+  - 잡 행에서 user_id/storage_id 로드 → User 조회 → share_post 호출
+  - 결과를 share_result_to_response로 직렬화해 payload에 저장
+  - 도메인 예외(권한·중복·네이버 실패 등)는 status="failed" + error로 보고
+- 비용 가드(#10) 자동 통합
+  - share 잡도 source='apify'로 마킹되므로 _is_apify_budget_exceeded가 자동 카운트
+  - 별도 코드 변경 없음, 잡 카운트 한 번에 share + crawl-async 통합
+
+- 잡 dedupe는 일단 도입 안 함 (Spot의 unique constraint로 결과적 보호)
+- 인증 컨텍스트는 user_id만 직렬화 (JWT 토큰 저장 X, 워커가 DB에서 User 재로딩)
+
+[2026-05-07 — Phase 1: /share 신뢰성 보강]
+- 네이버 Local Search 실패가 not_a_place_post로 위장되던 문제 수정
+  - app/services/naver_local_search.py: 키 미설정·네트워크 오류·non-200·JSON 파싱 실패를
+    빈 리스트 swallow 대신 NaverLocalSearchError로 raise
+  - app/routers/instagram.py: share_instagram_post에서 502 Bad Gateway로 매핑
+  - 정책: 일부 후보만 성공한 결과로 자동 매핑하면 못 본 후보 매칭을 빠뜨려 오탐 위험.
+    외부 의존성 실패는 빈 결과로 묻지 않고 클라이언트에 명확히 알림(전체 거절).
+- instagram_post_cache의 restricted_page 응답이 영구 hit되던 문제 수정
+  - app/services/instagram_pipeline.py:
+    - _RESTRICTED_TTL_SECONDS = 6 * 3600 상수
+    - _is_restricted_expired 헬퍼: source='apify' + payload.error='restricted_page' + age>=TTL
+    - get_cached: 만료된 restricted 캐시는 None 반환 → fetch_post 자연 재크롤
+    - save_cache: PostgreSQL ON CONFLICT DO UPDATE로 변환(fetched_at NOW() 갱신)
+      → 만료 후 재크롤 시 INSERT만으로는 PK 충돌해 빈약한 기존 행이 남는 문제 해소
+  - 정상 캐시(완전한 caption/위치)는 TTL 없음 — 인스타 캡션 편집 빈도 낮아 비용 추가만 발생
+- 마이그레이션 없음 (스키마 무변동, fetched_at 컬럼은 기존 그대로)
+
+[2026-05-07]
+- 인스타 공유 자동 장소 매핑 + 저장 도입 (방식 D — POST /instagram/share)
+  - 배경: Apify가 restricted 응답이라도 본문 + 임베디드 주소(📍...)는 안정 추출 → 방식 C(수동 선택 전제)의 데이터 부족 전제가 무너짐
+  - 흐름: fetch_post → 캡션 후보 추출 → 네이버 Local Search → naver_place_id dedupe
+    - 유니크 1건이면 자동 저장 (status="saved")
+    - 0건 또는 다수면 후보 + crawl_data 반환 (status="needs_selection") → 클라이언트가 사용자 선택 후 기존 /instagram/save 호출
+  - 신규 서비스
+    - app/services/naver_local_search.py — Naver Local Search Open API 래퍼 + mapx/mapy(WGS84×10⁷) 좌표 정규화
+    - app/services/place_extractor.py — 캡션에서 📍/주소 패턴/첫 줄 구분자 기반 후보 추출
+    - app/services/spot_creator.py — Place upsert + Spot 생성 로직 추출 (NaverPlaceData/InstagramData 데이터클래스, 커스텀 예외)
+    - app/services/instagram_share.py — 오케스트레이션
+  - 수정
+    - app/services/instagram_pipeline.py: _normalize_apify에 restricted_page 응답(description/image)→(caption/images[0]) 매핑 추가
+    - app/routers/instagram.py: /save를 spot_creator에 위임 + /share 핸들러 추가
+    - app/schemas/instagram.py: InstagramShareRequest/Response, PlaceCandidate, InstagramCrawlData 추가
+  - 환경변수: NAVER_CLIENT_ID, NAVER_CLIENT_SECRET (이미 .env.example 정의됨, 신규 사용처)
+  - 정책
+    - 자동 저장은 후보가 1건으로 수렴할 때만 (오탐 방지)
+    - 다중 장소 게시물(큐레이션) 자동 처리는 포기, 수동 폴백
+    - LLM 추출 미사용 (MVP 비용·지연 부담)
+
+[2026-05-06]
+- Apify 기반 인스타그램 크롤링 파이프라인 도입
+  - 기존 비로그인 OG 크롤러는 위치 태그 없는 게시물 본문 추출 불가 → Apify 액터(`apify/instagram-post-scraper`)를 기본 크롤러로 채택, OG는 fallback
+  - 신규 테이블 2개 (Alembic: b7c4d2e9a812)
+    - instagram_post_cache (shortcode PK, payload JSONB, source 'apify'|'og_fallback')
+    - instagram_crawl_jobs (id UUID, status, source, payload, error)
+  - 신규 서비스
+    - app/services/apify_client.py — ApifyClient.actor.call() 래핑, 예외 정의
+    - app/services/instagram_pipeline.py — shortcode 추출, 캐시 조회, Apify→OG fallback, 정규화, 월 비용 가드
+    - app/services/instagram_jobs.py — RQ 잡 함수 process_crawl_job(job_id)
+    - app/worker.py — RQ 워커 엔트리포인트 (Windows 호환 SimpleWorker)
+  - 신규 엔드포인트
+    - POST /instagram/crawl-async — 캐시 hit 즉시 반환, miss면 job_id 발급+enqueue
+    - GET  /instagram/jobs/{job_id} — 잡 폴링
+  - 기존 엔드포인트 유지 (변경 없음)
+    - POST /instagram/crawl (동기 OG)
+    - POST /instagram/save (place_raw_data/place_images에 Apify 응답 그대로 저장)
+  - 인프라
+    - app/main.py: Redis 연결 + RQ 큐를 lifespan에서 초기화 (Redis 미가동이면 라우터 503으로 graceful degrade)
+    - docker-compose.yml: worker 서비스 추가 (profile=worker, 별도 실행)
+  - 의존성: apify-client (>=1.8.0), rq (>=2.0.0)
+  - 환경변수: APIFY_TOKEN, APIFY_INSTAGRAM_ACTOR_ID, REDIS_URL, APIFY_MONTHLY_BUDGET_USD
+  - 비용 가드: 이번 달 source='apify' 잡 카운트 × 추정 단가가 한도 넘으면 즉시 OG fallback
 
 ============================================================
