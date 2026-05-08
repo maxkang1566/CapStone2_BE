@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -24,7 +25,7 @@ from app.schemas.instagram import (
     InstagramShareRequest,
     InstagramShareResponse,
 )
-from app.services import instagram_pipeline, instagram_share
+from app.services import instagram_pipeline, instagram_share, place_enrichment
 from app.services.instagram_crawler import InstagramCrawler
 from app.services.naver_local_search import NaverLocalSearchError
 from app.services.playwright_manager import PlaywrightManager
@@ -37,6 +38,8 @@ from app.services.spot_creator import (
     StoragePermissionError,
     create_spot_from_naver,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/instagram", tags=["instagram"])
 
@@ -93,6 +96,7 @@ async def crawl_instagram_post(
 @router.post("/save", response_model=InstagramSaveResponse, status_code=201)
 def save_instagram_spot(
     body: InstagramSaveRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> InstagramSaveResponse:
@@ -130,6 +134,27 @@ def save_instagram_spot(
         raise HTTPException(status_code=409, detail=str(e)) from e
     except SpotCreationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # 블로그 enrichment 잡 enqueue (best-effort).
+    # 큐 미초기화/Redis 다운으로 enqueue가 실패해도 본 응답엔 영향이 없어야 한다.
+    try:
+        place_enrichment.enqueue_blog_fetch_job(
+            place_id=result.spot.place_id,
+            user_id=current_user.id,
+            queue=_get_rq_queue(request),
+            db=db,
+        )
+    except HTTPException:
+        logger.exception(
+            "blog enrichment enqueue 실패(큐 미초기화): place_id=%s",
+            result.spot.place_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "blog enrichment enqueue 실패: place_id=%s",
+            result.spot.place_id,
+        )
+
     return InstagramSaveResponse(
         spot=result.spot,
         already_saved=result.already_saved,

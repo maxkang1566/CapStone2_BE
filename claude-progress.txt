@@ -318,4 +318,27 @@ pyproject.toml               Poetry 의존성
   - 환경변수: APIFY_TOKEN, APIFY_INSTAGRAM_ACTOR_ID, REDIS_URL, APIFY_MONTHLY_BUDGET_USD
   - 비용 가드: 이번 달 source='apify' 잡 카운트 × 추정 단가가 한도 넘으면 즉시 OG fallback
 
+[2026-05-08]
+- 네이버 블로그 enrichment(RQ 잡 기반 본문 수집) 도입 — AI 학습 코퍼스 확보용
+  - 트리거: /instagram/share 자동 저장 + /instagram/save 수동 저장 모두 (best-effort enqueue)
+  - 새 잡 종류: kind="naver_blog_fetch" (InstagramCrawlJob 재사용, 마이그레이션 없음)
+  - 흐름: place_id 잡 → 30일 freshness 체크 → quota 가드 → 검색 API → 각 link 모바일 페이지 본문 fetch → place_raw_data + place_reviews 적재
+  - 신규 서비스 4개
+    - app/services/naver_blog_search.py — Blog Search API 래퍼 (Local 패턴 미러)
+    - app/services/naver_blog_body_fetcher.py — m.blog.naver.com 본문 크롤러 (httpx + BS, 모바일 UA, SmartEditor 3 셀렉터 우선, 광고/협찬 마커 검출)
+    - app/services/place_enrichment.py — enqueue + freshness/quota + 검색→본문→DB 적재 오케스트레이션
+    - app/services/queue.py — 워커 안에서 RQ Queue 핸들 얻는 헬퍼
+  - 수정
+    - app/services/instagram_jobs.py: process_blog_fetch_job 신규, process_share_job 끝부분에 enqueue 추가
+    - app/routers/instagram.py: save_instagram_spot에 Request 파라미터 + enqueue 추가
+  - 정책
+    - 30일 갱신 (place_raw_data.collected_at 기준, 그 이내면 skip)
+    - 본문 우선, 실패 시 스니펫 fallback (PlaceReview.text)
+    - 본문 fetch 실패율 50% 초과 시 잡을 'blocked'로 마킹 (다음 잡에서 재시도)
+    - 쿼터 카운트는 payload에 'inserted_reviews' 키가 있는 행만 (스킵 잡 제외)
+    - 한국 주소 시/도 접미사 토큰 제거 후 검색 (매칭률 향상)
+  - 환경변수: NAVER_BLOG_MONTHLY_QUOTA_CALLS, NAVER_BLOG_BODY_FETCH_SLEEP(0.5), NAVER_BLOG_BODY_MAX_CHARS(2000)
+  - 검증: import OK, 검색 API 3건 반환, 모바일 페이지 본문 1833자 추출(SmartEditor 3), ON CONFLICT partial index SQL OK
+  - 기존 /places/from-naver의 BackgroundTasks 기반 naver_blog.py와 공존 (통합은 별도 작업으로 유보)
+
 ============================================================
