@@ -70,6 +70,23 @@ _NOISE_TOKENS = {
     "ad", "광고", "협찬", "파트너십", "소개", "리뷰",
 }
 
+# 행정구역 단독 토큰. 가게명 후보로 쓰면 "서울" → "서울특별시청" 같은 무관 결과 1순위가 잡힘.
+_ADMIN_REGION_TOKENS = {
+    "서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종",
+    "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주",
+    "서울시", "서울특별시", "부산시", "부산광역시", "대구시", "대구광역시",
+    "인천시", "인천광역시", "광주시", "광주광역시", "대전시", "대전광역시",
+    "울산시", "울산광역시", "세종시", "세종특별자치시",
+    "경기도", "강원도", "강원특별자치도", "충청북도", "충청남도",
+    "전라북도", "전북특별자치도", "전라남도",
+    "경상북도", "경상남도", "제주도", "제주특별자치도",
+}
+
+# 행정구역 접미사로 끝나는 단독 토큰. 공백 없는 단어 1개일 때만 매칭(가게명 복합어는 차단 안 됨).
+# 예: "강남구", "종로구", "성수동", "홍대역", "압구정" — 차단.
+#     "온누리식당", "강남노포" — 그대로 통과(다른 글자 포함).
+_ADMIN_SUFFIX_RE = re.compile(r"^[가-힣]{1,8}(?:구|군|동|읍|면|역)$")
+
 
 def _clean(text: str) -> str:
     text = text.strip()
@@ -80,12 +97,27 @@ def _clean(text: str) -> str:
     return text
 
 
+def _is_admin_token(text: str) -> bool:
+    """행정구역·지명 단독 토큰이면 True (가게명 후보로 부적합).
+
+    단어 1개로만 구성되고 행정구역에 해당하는 경우만 차단한다.
+    "온누리식당", "강남노포" 같은 복합어는 그대로 통과.
+    """
+    if text in _ADMIN_REGION_TOKENS:
+        return True
+    if _ADMIN_SUFFIX_RE.match(text):
+        return True
+    return False
+
+
 def _is_noise(text: str) -> bool:
     if not text:
         return True
     if len(text) < 2:
         return True
     if text.lower() in _NOISE_TOKENS:
+        return True
+    if _is_admin_token(text):
         return True
     # 해시태그·멘션만 있는 라인
     if re.fullmatch(r"[#@]\S+(?:\s+[#@]\S+)*", text):
@@ -139,12 +171,15 @@ def _extract_pin_before(caption: str) -> Iterable[str]:
 def _is_generic_hashtag(tag: str) -> bool:
     """해시태그가 주제·일반 태그면 True (가게명 후보로 쓰면 안 됨).
 
-    필터 두 단계:
+    필터 세 단계:
     1. 한글이 한 글자도 없는 태그(영문/일본어 일반어, 게임명, 트렌드 태그 등) 제외
        — 한국 가게는 거의 한글 이름이라 영문 only는 가게일 가능성 낮음.
     2. `*맛집`/`*카페` 같은 generic 접미어 매칭 제외.
+    3. 행정구역 단독("서울"·"강남"·"홍대역" 등) 제외.
     """
     if not any("가" <= ch <= "힣" for ch in tag):
+        return True
+    if _is_admin_token(tag):
         return True
     tag_lower = tag.lower()
     return any(tag_lower.endswith(s.lower()) for s in _GENERIC_TAG_SUFFIXES)

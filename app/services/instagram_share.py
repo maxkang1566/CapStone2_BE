@@ -4,7 +4,9 @@
 1. 같은 storage에 동일 instagram_url Spot이 이미 있으면 즉시 already_saved 반환 (단축 경로)
 2. instagram_pipeline.fetch_post → 캡션·이미지 확보 (캐시 hit이면 외부 호출 0회)
 3. place_extractor.extract_candidates → 후보 텍스트 리스트
-4. 각 후보당 naver_local_search.search_places → naver_place_id 기준 dedupe
+4. 각 후보당 naver_local_search.search_places → **첫 결과(1순위)만 채택** → naver_place_id 기준 dedupe
+   (네이버 Local Search는 정렬 우선순위가 의미 있어, 1순위 외 결과를 다 모으면 dedup 후 다중이 되어
+    `needs_selection`으로 떨어지는 비율이 비현실적으로 높았다 — 2026-05-09 dry-run 분석 결과)
 5. 분기:
    - 유니크 후보 1개 → 자동 저장(spot_creator) → status="saved"
    - 유니크 후보 0개 → 장소 게시물이 아님 → status="not_a_place_post" (저장 안 함)
@@ -126,10 +128,15 @@ def share_post(
         hashtags=crawl.hashtags,
     )
 
-    # 3) 각 후보를 네이버 Local Search → 결과 합치기
+    # 3) 각 후보를 네이버 Local Search → 첫 결과(1순위) 1개만 채택해 합치기.
+    #    네이버 응답 정렬은 매칭 신뢰도 순이라 1순위만 봐도 정답일 가능성이 매우 높다.
+    #    모든 결과(display=5)를 다 모으면 dedup 후 다중이 강제되어 `needs_selection`으로
+    #    부당하게 떨어지는 비율이 컸다(2026-05-09 dry-run: 25건 중 22건이 needs_selection).
     all_items: list[NaverLocalItem] = []
     for query in candidate_texts:
-        all_items.extend(naver_local_search.search_places(query))
+        results = naver_local_search.search_places(query)
+        if results:
+            all_items.append(results[0])
 
     unique = _dedupe_by_place_id(all_items)
 
