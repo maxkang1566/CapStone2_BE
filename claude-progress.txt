@@ -29,17 +29,17 @@
     - Swagger UI: https://capstone2be-production.up.railway.app/docs
 
 
-3. DB 스키마 (완료 - 12개 테이블)
+3. DB 스키마 (완료 - 13개 테이블)
 ------------------------------------------------------------
-  instagram_post_cache    - Apify/OG fallback 응답 shortcode 단위 캐시 (URL 재요청 시 재호출 방지)
   instagram_crawl_jobs    - 비동기 크롤링 잡 상태/결과 (id, status, source, payload, error)
   users              - 사용자 (email, password, kakao_id, nickname, profile_image)
   storages           - 저장소/창고 (title, description, is_public, deleted_at)
   storage_members    - 저장소 멤버 (storage_id, user_id, role: owner/editor/viewer)
   places             - 장소 마스터 (name, address, coordinate(PostGIS POINT), category_group, phone, homepage_url)
-  place_raw_data     - 장소 원천 데이터 (provider, raw_payload(JSONB))
+  place_raw_data     - 1차 raw 데이터 (provider, provider_place_id, raw_payload(JSONB), place_id 'nullable'). 인스타 raw도 여기 통합
+  place_reviews      - 장소 리뷰 (네이버 블로그 등 외부 출처)
   place_images       - 장소 이미지 (image_url, source, is_representative)
-  spots              - 스팟 (storage_id, place_id, added_by, instagram_url, user_memo, user_rating, is_visited)
+  spots              - 스팟 (storage_id, place_id, added_by, instagram_url, caption, user_memo, user_rating, is_visited)
   place_space_dna    - 장소 공간DNA (mbti_axes(JSONB), ai_summary)
   tags               - 태그 마스터 (name)
   place_tags         - 장소-태그 연결 (place_id, tag_id, score)
@@ -163,8 +163,39 @@ pyproject.toml               Poetry 의존성
  7순위    |  네이버↔인스타 크로스 중복 병합     |  좌표 근접 매칭 또는 Place 병합 UI 필요
 
 
-8. 최근 수정 사항 (2026-05-03 업데이트)
+8. 최근 수정 사항 (2026-05-08 업데이트)
 ------------------------------------------------------------
+[2026-05-08 — 인스타 raw → place_raw_data 1차 소스 통합]
+- 배경: 인스타 raw 데이터가 instagram_post_cache(전체 payload)와 place_raw_data(축약본)
+  두 테이블에 분산돼 있었고, caption은 정제 테이블(spots)에 노출되지 않아 사용자에게
+  보여줄 수 없었음. "raw → 정제(places/spots) → 사용자 표시"의 1차 소스 일원화 목표.
+- 마이그레이션 (Alembic: d4f9a1b3c5e7)
+  - place_raw_data.place_id NOT NULL → nullable (raw 먼저 적재, 정제 단계에서 UPDATE)
+  - spots.caption TEXT NULL 컬럼 추가 (응답 SpotResponse에 노출)
+  - 기존 축약본 행(provider_place_id=NULL)에서 raw_payload->>'url'로 shortcode 정정
+    (regexp_match로 capture group 추출, 단일 후보 NOT EXISTS 가드)
+  - instagram_post_cache → place_raw_data 데이터 복사
+    (메타키 _source/_url을 raw_payload에 주입, ON CONFLICT 시 place_id 보존)
+  - 기존 spots에 caption 백필 (raw_payload->>'caption' DISTINCT ON)
+  - instagram_post_cache 테이블 DROP
+- 코드 변경
+  - app/models/models.py: PlaceRawData.place_id Optional, Spot.caption 컬럼 추가,
+    InstagramPostCache 클래스 제거, Place.raw_data cascade='save-update, merge'로 좁힘
+  - app/services/instagram_pipeline.py: CachedPost dataclass 도입,
+    get_cached/save_cache가 place_raw_data 사용, restricted TTL은 collected_at 기준
+  - app/services/spot_creator.py: InstagramData에 shortcode 추가, 인스타 raw INSERT를
+    조건부 UPDATE(WHERE place_id IS NULL)로 교체, Spot 생성 시 caption 채움
+  - app/services/instagram_share.py: _to_instagram_data에서 shortcode 채움
+  - app/schemas/spot.py: SpotResponse에 caption 추가
+- 안전장치
+  - ON CONFLICT set_에 place_id 미포함 → 정제 연결 보존
+  - collected_at=NOW() 갱신 → restricted TTL 정상 작동
+  - 조건부 UPDATE → 동시성 race 방지
+  - delete-orphan 제거 → ORM 컬렉션 조작이 raw 자동 삭제 안 함
+- 영향
+  - 사용자 화면(SpotResponse)에 caption이 직접 노출됨 (raw_payload JSONB 파싱 불필요)
+  - 인스타 1차 raw가 단일 테이블(place_raw_data)에 통합 — Apify 응답 정보 손실 없음
+
 [2026-05-01]
 - OAuth2 인증 방식 수정: JSON body -> OAuth2PasswordRequestForm (Swagger 호환)
 - 리스트 API 페이징 적용: storages, spots에 page/size 파라미터 추가
@@ -340,5 +371,29 @@ pyproject.toml               Poetry 의존성
   - 환경변수: NAVER_BLOG_MONTHLY_QUOTA_CALLS, NAVER_BLOG_BODY_FETCH_SLEEP(0.5), NAVER_BLOG_BODY_MAX_CHARS(2000)
   - 검증: import OK, 검색 API 3건 반환, 모바일 페이지 본문 1833자 추출(SmartEditor 3), ON CONFLICT partial index SQL OK
   - 기존 /places/from-naver의 BackgroundTasks 기반 naver_blog.py와 공존 (통합은 별도 작업으로 유보)
+
+[2026-05-08 — AI팀용 운영 Places 시딩 도구 도입]
+- 목적: AI팀이 공간 DNA(MBTI 4축) 알고리즘 개발·검증할 수 있게 운영 Supabase 채워넣기
+- 신규
+  - scripts/seed_places.py — 시드 계정 운영 API 호출 스크립트 (httpx 동기)
+    - --mode share: seeds/instagram_urls.txt → POST /instagram/share (cache hit 동기 / miss 시 share-jobs/{id} 폴링)
+    - --mode naver: seeds/places_naver_fallback.csv → POST /places/from-naver
+    - 401 자동 재로그인, 502/503/타임아웃 지수 백오프 재시도
+    - --limit N으로 dry-run 표본 측정 가능 (saved 비율 → 메인 경로 결정)
+  - seeds/instagram_urls.txt — 인스타 URL 입력 양식 (DNA 4축 양극단 분포 가이드)
+  - seeds/places_naver_fallback.csv — 네이버 메타 폴백 양식
+  - seeds/golden_set.csv — AI팀 검증용 사전 라벨링 10건 양식
+  - seeds/README.md — 사전 셋업/실행/검증/AI팀 인터페이스 가이드
+  - notes/2026-05-08-ai-places-seeding.md — 작업 메모 (WHY 포함)
+- 사전 셋업 (사용자 액션 필요)
+  - Railway에 RQ 워커 프로세스 떠 있는지 확인 (HIGH 차단성)
+  - Railway 환경변수: APIFY_TOKEN, APIFY_INSTAGRAM_ACTOR_ID, NAVER_CLIENT_ID/SECRET, REDIS_URL
+  - test@example.com 운영 계정 등록 + 비밀번호 설정 (POST /auth/register, owner Storage 자동 생성)
+  - seeds/instagram_urls.txt에 100건 큐레이션 (4축 양극단 균등)
+- 다음 단계
+  - dry-run 20~30건 → saved 비율 측정 후 메인 경로 결정
+  - saved≥50% → 인스타 메인 유지 / saved<50% → 네이버 직입력 경로로 격하
+  - AI팀 합의 후 place_space_dna mbti_axes 키 명세 동결 (plan v3 권장: busy_calm/calm_flashy/modern_vintage/premium_value, -1.0~1.0)
+- 참고: ~/.claude/plans/ai-delightful-marshmallow.md (검증 보강 v3)
 
 ============================================================

@@ -1,0 +1,45 @@
+# Picklog 운영 시딩 — 인스타그램 게시물 URL 리스트
+#
+# 한 줄에 1개 URL.
+# `#`로 시작하는 줄과 빈 줄은 무시됨 (분류 코멘트로 활용 가능).
+#
+# 채우기 가이드 (DNA 4축 양극단 균등 커버 — 각 군 12~13건씩):
+#   * 고급 vs 가성비
+#   * 화려함 vs 차분
+#   * 최신 vs 빈티지
+#   * 붐빔 vs 여유
+# 행정구·카테고리도 가급적 분산. 100건 중 10건은 seeds/golden_set.csv에 사전 라벨링.
+#
+# 비공개·삭제 게시물은 자동 매핑이 실패하므로 공개 게시물만 등록.
+# 캡션에 가게명·주소가 명확히 보이는 게시물일수록 saved 적중률이 높음.
+
+# ---- 고급 / 차분 / 최신 / 여유 (예시 군) ----
+https://www.instagram.com/p/DDGYlvOy7XB/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DXbwLzeEfOn/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DW2dC-1krTG/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DWfNEwYktgd/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/p/DUz14zFEswA/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/p/DTRS8okElDI/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DStJonREmzd/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/p/DR6aQPjkupe/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/p/DPiamB-khrV/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DOJQkJ1Eg2P/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DIKzyeezskn/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DVH55usknW2/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/C9ZRH2Uymw-/?utm_source=ig_web_copy_link&igsh=NTc4MTIwNjQ2YQ==
+
+
+
+# ---- 가성비 / 화려함 / 빈티지 / 붐빔 (예시 군) ----
+https://www.instagram.com/reel/C8veqMoSvXi/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/C4dFmCfPQ8f/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/Cuv8HrONkxN/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DW5LekmRraC/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DIWXrqazsIG/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DGkeodcyGN9/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DXtPWKQk3pN/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DW-Uv0_Eyt0/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DWjBsvOkhuS/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DWI6fDZkmIk/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/reel/DYEmCQGzxHJ/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==
+https://www.instagram.com/p/DW_Gh6cFET5/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==

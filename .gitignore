@@ -6,3 +6,9 @@ __pycache__/
 .venv/
 *.pyc
 
+# 시딩 dry-run 산출물 — 매 회차 누적되므로 git 비대화 방지
+seeds/seed_run_*.log
+seeds/seed_run_*_pending.jsonl
+
+# Claude Code 로컬 상태
+.claude/scheduled_tasks.lock

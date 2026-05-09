@@ -1,0 +1,6 @@
+instagram_url,expected_axes,rationale
+# expected_axes는 JSON 문자열. plan에서 합의된 키 사용:
+# {"busy_calm": -1.0..1.0, "calm_flashy": -1.0..1.0, "modern_vintage": -1.0..1.0, "premium_value": -1.0..1.0}
+# 음수=좌극(붐빔/차분/최신/고급), 양수=우극(여유/화려함/빈티지/가성비).
+# 예시:
+# https://www.instagram.com/p/XXXX/,"{""busy_calm"": -0.8, ""calm_flashy"": 0.7, ""modern_vintage"": -0.6, ""premium_value"": -0.5}",핫플 루프탑바 — 붐빔/화려/최신/고급
