@@ -27,7 +27,12 @@ from app.schemas.instagram import (
     PlaceCandidate,
 )
 from app.schemas.spot import SpotResponse
-from app.services import instagram_pipeline, naver_local_search, place_extractor
+from app.services import (
+    instagram_pipeline,
+    naver_local_search,
+    place_disambiguator,
+    place_extractor,
+)
 from app.services.naver_local_search import NaverLocalItem
 from app.services.playwright_manager import PlaywrightManager
 from app.services.spot_creator import (
@@ -188,7 +193,28 @@ def share_post(
             crawl_source=source,
         )
 
-    # 6) 유니크 2개 이상 → 사용자 선택 필요
+    # 6) 유니크 2개 이상 → LLM disambiguator로 정답 1개 시도.
+    #    캡션 자연어를 읽고 후보 풀에서 정답 1개를 고른다(환각 시 None 반환, 폴백 안전).
+    #    notes/2026-05-09 dry-run에서 이 단계 없이 saved 비율이 16%에서 정체했다.
+    chosen = place_disambiguator.disambiguate(crawl.caption or "", unique)
+    if chosen is not None:
+        spot_result = create_spot_from_naver(
+            _to_naver_place(chosen),
+            _to_instagram_data(crawl),
+            storage_id,
+            current_user,
+            db,
+        )
+        return ShareResult(
+            status="saved",
+            spot=spot_result.spot,
+            place_created=spot_result.place_created,
+            already_saved=spot_result.already_saved,
+            crawl=crawl,
+            crawl_source=source,
+        )
+
+    # 7) LLM도 정답 못 찾음 → 사용자 선택 필요
     return ShareResult(
         status="needs_selection",
         crawl=crawl,
