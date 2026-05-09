@@ -308,6 +308,30 @@ def share_instagram_post(
             ) from e
 
         response = instagram_share.share_result_to_response(result)
+
+        # saved 분기에서 블로그 enrichment 잡 트리거 (best-effort).
+        # cache miss 흐름은 워커가 process_share_job에서 enqueue하지만 cache hit
+        # 동기 흐름에선 누락돼 있어 reviews가 채워지지 않던 버그를 수정한다.
+        # 중복 enqueue 가능하지만 `_should_refresh`(30일) 가드로 idempotent.
+        if result.status == "saved" and result.spot is not None:
+            try:
+                place_enrichment.enqueue_blog_fetch_job(
+                    place_id=result.spot.place_id,
+                    user_id=current_user.id,
+                    queue=_get_rq_queue(request),
+                    db=db,
+                )
+            except HTTPException:
+                logger.exception(
+                    "blog enrichment enqueue 실패(큐 미초기화): place_id=%s",
+                    result.spot.place_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "blog enrichment enqueue 실패: place_id=%s",
+                    result.spot.place_id,
+                )
+
         return InstagramShareEnqueueResponse(job_id=None, status="done", result=response)
 
     # 2) 캐시 miss → 잡 등록 + 큐 enqueue
