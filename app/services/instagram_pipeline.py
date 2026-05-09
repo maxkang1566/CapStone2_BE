@@ -2,10 +2,14 @@
 
 흐름:
 1. URL에서 shortcode 추출
-2. instagram_post_cache 조회 → hit 시 즉시 정규화 응답
+2. place_raw_data(provider='instagram', provider_place_id=shortcode) 조회 → hit 시 즉시 정규화 응답
 3. miss 시 Apify 호출 시도 (월 비용 한도 체크 포함)
 4. Apify 실패/한도 초과 시 OG 메타 fallback (기존 InstagramCrawler)
-5. 결과를 캐시에 저장하고 정규화하여 반환
+5. 결과를 raw로 저장하고 정규화하여 반환
+
+캐시 저장소가 별도 instagram_post_cache 테이블이 아니라 place_raw_data로 통합된 이유:
+인스타 raw를 사용자에게 보여줄 정제 데이터(places/spots)와 같은 1차 소스로 다루기 위함.
+저장 시점에는 place_id=NULL로 두고, 정제 단계(spot_creator)에서 매핑된 place_id를 UPDATE로 채운다.
 
 모든 외부 호출은 동기적으로 일어나며, 비동기 라우터 컨텍스트에서는
 워커(`app.services.instagram_jobs.process_crawl_job`)에서 호출하는 것을 가정한다.
@@ -15,16 +19,17 @@ from __future__ import annotations
 import logging
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import func as sa_func
+from sqlalchemy import func as sa_func, text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.models.models import InstagramCrawlJob, InstagramPostCache
+from app.models.models import InstagramCrawlJob, PlaceRawData
 from app.schemas.instagram import InstagramCrawlResponse
 from app.services import apify_client
 from app.services.apify_client import (
@@ -50,6 +55,17 @@ class PipelineError(Exception):
     """파이프라인 처리 실패."""
 
 
+@dataclass
+class CachedPost:
+    """get_cached가 반환하는 캐시 표현. raw_payload 안에 묻힌 메타키(_source, _url)를
+    풀어 명시 필드로 노출해 호출처가 PlaceRawData 내부 구조에 직접 의존하지 않도록 한다.
+    """
+    payload: dict           # 메타키(_source, _url) 제거된 정규화 payload
+    source: str             # 'apify' | 'og_fallback'
+    collected_at: datetime
+    url: Optional[str] = None  # 메타키 _url 복원 (필요 시)
+
+
 def extract_shortcode(url: str) -> Optional[str]:
     """인스타 URL에서 게시물 shortcode를 추출한다."""
     if not url:
@@ -58,62 +74,105 @@ def extract_shortcode(url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def _is_restricted_expired(row: InstagramPostCache) -> bool:
+def _split_meta_keys(raw_payload: Optional[dict]) -> tuple[dict, str, Optional[str]]:
+    """raw_payload에서 메타키를 분리해 (clean_payload, source, url) 튜플로 반환한다.
+
+    save_cache가 raw_payload에 _source/_url을 주입해두고, get_cached에서 이를 풀어낸다.
+    save_cache 이전 형태(메타키 없음)도 안전하게 처리: source 기본값은 'apify'.
+    """
+    if not raw_payload:
+        return {}, "apify", None
+    payload = dict(raw_payload)
+    source = payload.pop("_source", "apify")
+    url = payload.pop("_url", None)
+    return payload, source, url
+
+
+def _is_restricted_expired(row: PlaceRawData, source: str) -> bool:
     """restricted_page 응답 캐시가 TTL을 넘겼는지 판정한다.
-    정상 캐시(restricted가 아니거나 source != 'apify')는 항상 False(만료 없음)."""
-    if row.source != "apify":
+    정상 캐시(restricted가 아니거나 source != 'apify')는 항상 False(만료 없음).
+    """
+    if source != "apify":
         return False
-    payload = row.payload or {}
+    payload = row.raw_payload or {}
     if payload.get("error") != "restricted_page":
         return False
-    fetched = row.fetched_at
-    if fetched is None:
+    collected = row.collected_at
+    if collected is None:
         return True
     # DB가 naive datetime을 줄 수 있으니 UTC로 보정해서 비교
-    if fetched.tzinfo is None:
-        fetched = fetched.replace(tzinfo=timezone.utc)
-    age = datetime.now(timezone.utc) - fetched
+    if collected.tzinfo is None:
+        collected = collected.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - collected
     return age >= timedelta(seconds=_RESTRICTED_TTL_SECONDS)
 
 
-def get_cached(db: Session, shortcode: str) -> Optional[InstagramPostCache]:
-    """shortcode로 캐시 행을 조회한다.
+def get_cached(db: Session, shortcode: str) -> Optional[CachedPost]:
+    """shortcode로 캐시된 인스타 raw를 조회한다.
 
     restricted_page 응답이 TTL을 넘긴 경우는 None을 반환해 fetch_post가 재크롤하도록 한다.
     `save_cache`가 UPSERT라 만료된 행을 미리 지울 필요 없음.
     """
-    row = db.query(InstagramPostCache).filter(InstagramPostCache.shortcode == shortcode).first()
+    row = (
+        db.query(PlaceRawData)
+        .filter(
+            PlaceRawData.provider == "instagram",
+            PlaceRawData.provider_place_id == shortcode,
+        )
+        .first()
+    )
     if row is None:
         return None
-    if _is_restricted_expired(row):
+
+    clean_payload, source, url = _split_meta_keys(row.raw_payload)
+    if _is_restricted_expired(row, source):
         logger.info(
             "restricted_page 캐시(shortcode=%s)가 TTL을 넘겨 재크롤 대상으로 처리합니다.",
             shortcode,
         )
         return None
-    return row
+    return CachedPost(
+        payload=clean_payload,
+        source=source,
+        collected_at=row.collected_at,
+        url=url,
+    )
 
 
 def save_cache(db: Session, shortcode: str, url: str, payload: dict, source: str) -> None:
-    """캐시 행을 UPSERT한다(`shortcode` PK 충돌 시 최신 페이로드로 덮어쓰며 fetched_at 갱신).
+    """인스타 raw 응답을 place_raw_data에 UPSERT한다.
 
-    UPSERT인 이유: restricted 캐시가 TTL 만료 후 재크롤될 때 INSERT만 가능하면 PK 충돌로
-    rollback돼 빈약한 기존 행이 그대로 남는다. ON CONFLICT DO UPDATE로 새 응답으로 덮어쓰고
-    fetched_at도 NOW()로 갱신해 다음 만료 체크 기준점을 정확히 유지.
+    저장 형태:
+      provider='instagram', provider_place_id=shortcode, place_id=NULL(아직 정제 전),
+      raw_payload={..원본 전체.., '_source': source, '_url': url}
+
+    ON CONFLICT 처리:
+      - 부분 유니크 인덱스 `uq_place_raw_data_provider_pid`(provider, provider_place_id)
+        WHERE provider_place_id IS NOT NULL을 conflict target으로 사용
+      - DO UPDATE에는 raw_payload, collected_at만 갱신하고 **place_id는 보존한다**
+        (정제 단계에서 채워진 연결을 재크롤이 NULL로 덮어쓰면 안 되므로)
+      - collected_at=NOW()로 갱신해 restricted TTL 기준점을 새로 잡는다.
+
+    트랜잭션 경계: 자체 commit. 후속 share_post 흐름이 IntegrityError로 롤백돼도 raw 행은
+    살아있고, 다음 시도 시 UPSERT로 동일 행을 갱신한다.
     """
-    stmt = pg_insert(InstagramPostCache).values(
-        shortcode=shortcode,
-        url=url,
-        payload=payload,
-        source=source,
+    enriched_payload = dict(payload)
+    enriched_payload["_source"] = source
+    enriched_payload["_url"] = url
+
+    stmt = pg_insert(PlaceRawData).values(
+        place_id=None,
+        provider="instagram",
+        provider_place_id=shortcode,
+        raw_payload=enriched_payload,
     )
     stmt = stmt.on_conflict_do_update(
-        index_elements=["shortcode"],
+        index_elements=["provider", "provider_place_id"],
+        index_where=sa_text("provider_place_id IS NOT NULL"),
         set_={
-            "url": url,
-            "payload": payload,
-            "source": source,
-            "fetched_at": sa_func.now(),
+            "raw_payload": stmt.excluded.raw_payload,
+            "collected_at": sa_func.now(),
+            # ★ place_id는 set_에 포함하지 않음 — 정제 단계가 채운 연결 보존
         },
     )
     db.execute(stmt)

@@ -88,8 +88,11 @@ def _to_naver_place(item: NaverLocalItem) -> NaverPlaceData:
 
 def _to_instagram_data(crawl: InstagramCrawlResponse) -> InstagramData:
     thumbnail = crawl.images[0] if crawl.images else None
+    # shortcode를 채워 spot_creator가 이미 적재된 raw 행에 place_id를 UPDATE로 연결할 수 있게 한다.
+    # share 흐름에서 fetch_post가 항상 먼저 호출되므로 raw는 이 시점에 존재함이 보장됨.
     return InstagramData(
         url=str(crawl.url),
+        shortcode=instagram_pipeline.extract_shortcode(str(crawl.url)),
         caption=crawl.caption,
         thumbnail_url=thumbnail,
     )

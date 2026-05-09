@@ -102,8 +102,12 @@ class Place(Base):
     # GeoAlchemy2가 coordinate 컬럼에 idx_places_coordinate GIST 인덱스를 자동 생성합니다.
 
     spots: Mapped[list[Spot]] = relationship("Spot", back_populates="place")
+    # delete-orphan을 쓰지 않는 이유: place_raw_data.place_id가 nullable이라 raw 행이
+    # place와 association이 없는 상태(place_id=NULL)로 정상 존재할 수 있다. delete-orphan을
+    # 켜두면 ORM이 컬렉션에서 detach된 raw를 즉시 DELETE하는데, 이는 1차 적재(raw 먼저,
+    # 정제 나중) 흐름과 충돌한다. place 삭제 시 raw 정리는 DB FK의 ON DELETE CASCADE에 맡긴다.
     raw_data: Mapped[list[PlaceRawData]] = relationship(
-        "PlaceRawData", back_populates="place", cascade="all, delete-orphan"
+        "PlaceRawData", back_populates="place", cascade="save-update, merge"
     )
     images: Mapped[list[PlaceImage]] = relationship(
         "PlaceImage", back_populates="place", cascade="all, delete-orphan"
@@ -123,8 +127,11 @@ class PlaceRawData(Base):
     __tablename__ = "place_raw_data"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    place_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("places.id", ondelete="CASCADE"), nullable=False
+    # place_id가 nullable인 이유: 인스타 공유 흐름에서 Apify가 게시물을 먼저 긁어
+    # 1차 raw로 적재하는 시점에는 아직 어느 Place에 연결될지 모른다(네이버 검색 매핑 후 결정).
+    # 정제 단계(spot_creator)에서 place_id를 UPDATE로 채워 raw → places 흐름을 잇는다.
+    place_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("places.id", ondelete="CASCADE"), nullable=True
     )
     provider: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     provider_place_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -140,7 +147,7 @@ class PlaceRawData(Base):
         ),
     )
 
-    place: Mapped[Place] = relationship("Place", back_populates="raw_data")
+    place: Mapped[Optional[Place]] = relationship("Place", back_populates="raw_data")
     images: Mapped[list[PlaceImage]] = relationship("PlaceImage", back_populates="raw_data")
     reviews: Mapped[list[PlaceReview]] = relationship("PlaceReview", back_populates="raw_data")
 
@@ -160,6 +167,9 @@ class Spot(Base):
     )
     instagram_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     thumbnail_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # 인스타 공유 흐름에서 Apify로 긁은 caption을 그대로 저장. raw_payload에서도 읽을 수
+    # 있지만 사용자 응답마다 JSONB 파싱하기보다 정제 컬럼으로 노출하는 게 단순하고 빠르다.
+    caption: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     user_memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     user_rating: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     is_visited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -268,18 +278,6 @@ class UserSpaceDNAHistory(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
 
     user: Mapped[User] = relationship("User", back_populates="dna_history")
-
-
-class InstagramPostCache(Base):
-    """Apify(또는 OG fallback)로 가져온 인스타 게시물 응답을 shortcode 단위로 캐싱한다.
-    같은 게시물을 여러 사용자가 공유해도 외부 호출은 1번만 일어나도록 보장한다."""
-    __tablename__ = "instagram_post_cache"
-
-    shortcode: Mapped[str] = mapped_column(String, primary_key=True)
-    url: Mapped[str] = mapped_column(String, nullable=False)
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    source: Mapped[str] = mapped_column(String, nullable=False)  # 'apify' | 'og_fallback'
-    fetched_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
 
 
 class InstagramCrawlJob(Base):

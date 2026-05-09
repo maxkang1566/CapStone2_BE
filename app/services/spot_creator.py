@@ -8,7 +8,10 @@
     2. 같은 storage에 동일 instagram_url Spot이 이미 있는지 확인 → 있으면 DuplicateInstagramUrlError
     3. naver_place_id 기준으로 Place upsert (PlaceRawData provider="naver")
     4. 같은 Place의 Spot이 이미 storage에 있으면 already_saved=True 반환 (insert 안 함)
-    5. PlaceRawData(provider="instagram") + PlaceImage(대표) + Spot 생성 후 commit
+    5. 인스타 raw 연결: shortcode가 있으면 instagram_pipeline.save_cache가 이미 적재한
+       PlaceRawData(provider="instagram") 행의 place_id를 UPDATE로 채워 연결한다.
+       shortcode가 없는 경우(수동 폴백)에는 기존처럼 축약본을 새 행으로 INSERT.
+    6. PlaceImage(대표) + Spot(caption 포함) 생성 후 commit
 """
 from __future__ import annotations
 
@@ -16,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from geoalchemy2.elements import WKTElement
+from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -64,6 +68,10 @@ class NaverPlaceData:
 class InstagramData:
     """Spot에 첨부할 인스타그램 부가 데이터."""
     url: str
+    # shortcode가 채워져 있으면 인스타 raw 행(provider='instagram', provider_place_id=shortcode)이
+    # Apify 호출 시점에 이미 적재돼 있다고 가정하고, place_id를 UPDATE로 채워 연결한다.
+    # None이면 수동 폴백 등으로 raw 적재 단계를 거치지 않은 케이스 → 기존처럼 새 행 INSERT.
+    shortcode: Optional[str] = None
     caption: Optional[str] = None
     thumbnail_url: Optional[str] = None
     user_memo: Optional[str] = None
@@ -180,17 +188,53 @@ def create_spot_from_naver(
     if existing_spot:
         return SpotCreateResult(spot=existing_spot, place_created=False, already_saved=True)
 
-    # 인스타그램 원본 보관
-    db.add(PlaceRawData(
-        place_id=place.id,
-        provider="instagram",
-        provider_place_id=None,
-        raw_payload={
-            "url": instagram.url,
-            "caption": instagram.caption,
-            "thumbnail_url": instagram.thumbnail_url,
-        },
-    ))
+    # 인스타그램 원본 raw 연결: shortcode가 있으면 이미 적재된 raw 행에 place_id를 채우고,
+    # 없으면 (수동 폴백 등) 기존처럼 축약본을 새로 INSERT한다.
+    if instagram.shortcode:
+        # 조건부 UPDATE: place_id가 아직 비어있을 때만 연결. 이미 다른 트랜잭션이 다른
+        # place_id로 채웠다면 rowcount=0이 되어 그대로 둔다(같은 게시물을 다른 storage가
+        # 먼저 다른 가게로 매핑한 경우 — 비현실적이지만 race 안전).
+        result = db.execute(
+            sa_update(PlaceRawData)
+            .where(
+                PlaceRawData.provider == "instagram",
+                PlaceRawData.provider_place_id == instagram.shortcode,
+                PlaceRawData.place_id.is_(None),
+            )
+            .values(place_id=place.id)
+        )
+        if result.rowcount == 0:
+            existing = (
+                db.query(PlaceRawData)
+                .filter(
+                    PlaceRawData.provider == "instagram",
+                    PlaceRawData.provider_place_id == instagram.shortcode,
+                )
+                .first()
+            )
+            if existing is None:
+                # 캐시 누락 방어: 정규 흐름이라면 save_cache가 이미 적재했어야 함
+                db.add(PlaceRawData(
+                    place_id=place.id,
+                    provider="instagram",
+                    provider_place_id=instagram.shortcode,
+                    raw_payload={
+                        "url": instagram.url,
+                        "caption": instagram.caption,
+                        "thumbnail_url": instagram.thumbnail_url,
+                    },
+                ))
+    else:
+        db.add(PlaceRawData(
+            place_id=place.id,
+            provider="instagram",
+            provider_place_id=None,
+            raw_payload={
+                "url": instagram.url,
+                "caption": instagram.caption,
+                "thumbnail_url": instagram.thumbnail_url,
+            },
+        ))
 
     # 대표 이미지
     if instagram.thumbnail_url:
@@ -207,6 +251,7 @@ def create_spot_from_naver(
         added_by=current_user.id,
         instagram_url=instagram.url,
         thumbnail_url=instagram.thumbnail_url,
+        caption=instagram.caption,
         user_memo=instagram.user_memo,
         user_rating=instagram.user_rating,
     )

@@ -29,6 +29,7 @@ class SpotResponse(BaseModel):
     added_by: int
     instagram_url: Optional[str]
     thumbnail_url: Optional[str]
+    caption: Optional[str]
     user_memo: Optional[str]
     user_rating: Optional[float]
     is_visited: bool
