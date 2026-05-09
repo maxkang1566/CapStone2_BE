@@ -32,6 +32,7 @@ from app.models.models import (
     StorageMember,
     User,
 )
+from app.services import image_storage
 
 
 class SpotCreationError(Exception):
@@ -236,21 +237,30 @@ def create_spot_from_naver(
             },
         ))
 
-    # 대표 이미지
+    # 대표 이미지 — 인스타 CDN URL은 4~5일 후 만료되므로 Supabase Storage에
+    # 업로드 후 영구 URL을 저장한다. 업로드 실패 시 원본 URL로 폴백(가용성 우선).
+    permanent_url: Optional[str] = None
     if instagram.thumbnail_url:
+        permanent_url = image_storage.upload_instagram_image(
+            image_url=instagram.thumbnail_url,
+            shortcode=instagram.shortcode,
+        )
+        saved_image_url = permanent_url or instagram.thumbnail_url
         db.add(PlaceImage(
             place_id=place.id,
-            image_url=instagram.thumbnail_url,
+            image_url=saved_image_url,
             source="instagram",
             is_representative=True,
         ))
+    else:
+        saved_image_url = None
 
     spot = Spot(
         storage_id=storage_id,
         place_id=place.id,
         added_by=current_user.id,
         instagram_url=instagram.url,
-        thumbnail_url=instagram.thumbnail_url,
+        thumbnail_url=saved_image_url,
         caption=instagram.caption,
         user_memo=instagram.user_memo,
         user_rating=instagram.user_rating,
