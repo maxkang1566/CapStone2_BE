@@ -49,6 +49,25 @@ class ShareResult:
     candidates: list[NaverLocalItem] = field(default_factory=list)
 
 
+# 자동 매핑 후보로 부적합한 네이버 카테고리 그룹.
+# 캡션의 행정구역명("이태원", "마곡") 검색 시 그 지역 구청·주민센터·관광명소가 1순위를
+# 점령해 매핑 정확도를 떨어뜨리는 패턴이 잦아 자동 매핑 단계에서 제외한다.
+# 단, candidates 응답에는 노출되므로(블랙리스트 외 결과만 제외) 사용자 수동 선택 흐름에는 영향 없음.
+_NON_PLACE_CATEGORY_GROUPS = frozenset({
+    "공공,사회기관",
+    "행정복지센터",
+    "특별,광역시청",
+    "여행,명소",
+    "교육,학문",
+    "건강,의료",
+})
+
+
+def _is_place_business(item: NaverLocalItem) -> bool:
+    """음식점·술집·카페 등 가게 카테고리이면 True. 행정기관·관광명소 류는 False."""
+    return (item.category_group or "") not in _NON_PLACE_CATEGORY_GROUPS
+
+
 def _dedupe_by_place_id(items: list[NaverLocalItem]) -> list[NaverLocalItem]:
     """naver_place_id 기준으로 첫 등장만 살린다. id 없는 항목은 제외(매핑 불가)."""
     seen: set[str] = set()
@@ -128,15 +147,17 @@ def share_post(
         hashtags=crawl.hashtags,
     )
 
-    # 3) 각 후보를 네이버 Local Search → 첫 결과(1순위) 1개만 채택해 합치기.
-    #    네이버 응답 정렬은 매칭 신뢰도 순이라 1순위만 봐도 정답일 가능성이 매우 높다.
-    #    모든 결과(display=5)를 다 모으면 dedup 후 다중이 강제되어 `needs_selection`으로
-    #    부당하게 떨어지는 비율이 컸다(2026-05-09 dry-run: 25건 중 22건이 needs_selection).
+    # 3) 각 후보를 네이버 Local Search → 비-가게 카테고리(행정기관·관광명소·교육기관 등)를
+    #    제외한 후 첫 결과(1순위) 1개만 채택해 합치기.
+    #    - 1순위만 채택: 네이버 응답 정렬은 매칭 신뢰도 순이라 1순위만 봐도 정답일 가능성이 높다.
+    #    - 비-가게 차단: 캡션의 행정구역명("이태원"·"마곡") 검색 시 그 지역 구청·주민센터·
+    #      관광명소가 1순위를 점령해 정답을 밀어내는 패턴이 잦았다(2026-05-09 dry-run 분석).
     all_items: list[NaverLocalItem] = []
     for query in candidate_texts:
         results = naver_local_search.search_places(query)
-        if results:
-            all_items.append(results[0])
+        place_results = [r for r in results if _is_place_business(r)]
+        if place_results:
+            all_items.append(place_results[0])
 
     unique = _dedupe_by_place_id(all_items)
 
