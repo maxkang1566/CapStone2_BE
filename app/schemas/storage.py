@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -34,3 +34,23 @@ class StorageMemberResponse(BaseModel):
     user_id: int
     role: str
     joined_at: datetime
+
+
+class StorageMemberAddRequest(BaseModel):
+    user_id: int
+    role: Literal["editor", "viewer"]
+
+
+class StorageMemberRoleUpdate(BaseModel):
+    role: Literal["owner", "editor", "viewer"]
+
+
+class StorageMemberDetailResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    storage_id: int
+    user_id: int
+    role: str
+    joined_at: datetime
+    nickname: Optional[str] = None
+    profile_image: Optional[str] = None

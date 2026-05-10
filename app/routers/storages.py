@@ -1,12 +1,19 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
 from app.models.models import Storage, StorageMember, User
-from app.schemas.storage import StorageCreate, StorageResponse, StorageUpdate
+from app.schemas.storage import (
+    StorageCreate,
+    StorageMemberAddRequest,
+    StorageMemberDetailResponse,
+    StorageMemberRoleUpdate,
+    StorageResponse,
+    StorageUpdate,
+)
 
 router = APIRouter(prefix="/storages", tags=["storages"])
 
@@ -102,4 +109,179 @@ def delete_storage(
 ):
     member = _get_member(storage_id, db, current_user, required_roles=("owner",))
     member.storage.deleted_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+# ----- 멤버 관리 -----
+
+def _get_target_member(
+    storage_id: int, target_user_id: int, db: Session
+) -> StorageMember:
+    target = (
+        db.query(StorageMember)
+        .filter(
+            StorageMember.storage_id == storage_id,
+            StorageMember.user_id == target_user_id,
+        )
+        .first()
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="멤버를 찾을 수 없습니다.")
+    return target
+
+
+def _to_member_detail(member: StorageMember) -> StorageMemberDetailResponse:
+    user = member.user
+    return StorageMemberDetailResponse(
+        storage_id=member.storage_id,
+        user_id=member.user_id,
+        role=member.role,
+        joined_at=member.joined_at,
+        nickname=user.nickname if user else None,
+        profile_image=user.profile_image if user else None,
+    )
+
+
+@router.get(
+    "/{storage_id}/members",
+    response_model=list[StorageMemberDetailResponse],
+)
+def list_members(
+    storage_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """창고 멤버 목록. 멤버 누구나 조회 가능."""
+    _get_member(storage_id, db, current_user)
+    members = (
+        db.query(StorageMember)
+        .options(joinedload(StorageMember.user))
+        .filter(StorageMember.storage_id == storage_id)
+        .order_by(StorageMember.joined_at.asc())
+        .all()
+    )
+    return [_to_member_detail(m) for m in members]
+
+
+@router.post(
+    "/{storage_id}/members",
+    response_model=StorageMemberDetailResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_member(
+    storage_id: int,
+    body: StorageMemberAddRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """user_id로 멤버 추가 (owner 전용). role은 editor 또는 viewer만 허용."""
+    _get_member(storage_id, db, current_user, required_roles=("owner",))
+
+    target_user = db.query(User).filter(User.id == body.user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+
+    existing = (
+        db.query(StorageMember)
+        .filter(
+            StorageMember.storage_id == storage_id,
+            StorageMember.user_id == body.user_id,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="이미 저장소 멤버입니다.")
+
+    new_member = StorageMember(
+        storage_id=storage_id, user_id=body.user_id, role=body.role
+    )
+    db.add(new_member)
+    db.commit()
+    db.refresh(new_member)
+    return _to_member_detail(new_member)
+
+
+@router.patch(
+    "/{storage_id}/members/{user_id}",
+    response_model=StorageMemberDetailResponse,
+)
+def update_member_role(
+    storage_id: int,
+    user_id: int,
+    body: StorageMemberRoleUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """멤버 role 변경 (owner 전용).
+
+    role="owner"로 변경 시 기존 owner는 자동으로 editor로 강등 — 같은 트랜잭션
+    안에서 두 UPDATE가 단일 commit으로 처리되므로 외부에서 owner 0명/2명
+    상태를 관측할 수 없다. 동시 transfer 레이스는 owner 1명 모델상 실질 불가하여
+    row-lock은 두지 않는다.
+    """
+    caller = _get_member(storage_id, db, current_user, required_roles=("owner",))
+    target = _get_target_member(storage_id, user_id, db)
+
+    # 자기 자신을 owner로 다시 지정 → 멱등 no-op
+    if target.user_id == caller.user_id and body.role == "owner":
+        return _to_member_detail(target)
+
+    # 유일 owner 본인 강등 거부
+    if target.user_id == caller.user_id and body.role != "owner":
+        raise HTTPException(
+            status_code=409,
+            detail="유일한 소유자는 강등할 수 없습니다. 먼저 다른 멤버에게 소유권을 이전하세요.",
+        )
+
+    if body.role == "owner":
+        caller.role = "editor"
+        target.role = "owner"
+    else:
+        target.role = body.role
+    db.commit()
+    db.refresh(target)
+    return _to_member_detail(target)
+
+
+# /members/me는 반드시 /members/{user_id}보다 먼저 선언해야 라우트 매칭이
+# 정상 동작한다 (FastAPI는 등록 순서대로 매칭).
+@router.delete(
+    "/{storage_id}/members/me",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def leave_storage(
+    storage_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """본인이 저장소에서 나가기. owner는 leave 불가 (transfer 또는 storage 삭제)."""
+    member = _get_member(storage_id, db, current_user)
+    if member.role == "owner":
+        raise HTTPException(
+            status_code=400,
+            detail="소유자는 떠날 수 없습니다. 먼저 소유권을 이전하거나 저장소를 삭제하세요.",
+        )
+    db.delete(member)
+    db.commit()
+
+
+@router.delete(
+    "/{storage_id}/members/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def remove_member(
+    storage_id: int,
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """멤버 추방 (owner 전용). 본인은 /members/me로 떠나야 한다."""
+    _get_member(storage_id, db, current_user, required_roles=("owner",))
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=400,
+            detail="본인은 추방할 수 없습니다. /members/me 엔드포인트로 떠나세요.",
+        )
+    target = _get_target_member(storage_id, user_id, db)
+    db.delete(target)
     db.commit()

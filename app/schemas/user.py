@@ -43,3 +43,11 @@ class KakaoLoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     is_new_user: bool
+
+
+class UserSearchResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    nickname: str
+    profile_image: Optional[str] = None
