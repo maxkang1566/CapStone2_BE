@@ -63,6 +63,7 @@
 [사용자 - /users]
   GET  /users/me            내 정보 조회
   PUT  /users/me            프로필 수정 (nickname, profile_image)
+  GET  /users/me/space-dna  내 공간 DNA 조회 (없으면 has_data=false)
   GET  /users/search?q=&size=  닉네임 prefix 검색 (창고 초대용. 본인 제외, 카카오 임시 이메일 우회)
 
 [저장소 - /storages]
@@ -89,6 +90,7 @@
 [장소 - /places]
   GET  /places?q=검색어              장소 검색 (이름 기반, 페이징)
   GET  /places/{id}                  장소 상세 조회
+  GET  /places/{id}/space-dna        장소 공간 DNA 조회 (없으면 has_data=false)
 
 [인스타그램 - /instagram]
   POST /instagram/crawl         URL 크롤링 (OG 메타, 동기 - 레거시 유지)
@@ -162,16 +164,34 @@ pyproject.toml               Poetry 의존성
 ------------------------------------------------------------
  우선순위  |  항목                              |  비고
 ----------+------------------------------------+-------------------------------
- 1순위    |  공간 탐색 (반경 검색)              |  PostGIS ST_DWithin, 네이버맵 API 연동 필요
- 2순위    |  공개 창고 탐색/피드                |  is_public 필드 활용
- 3순위    |  장소 DNA AI 분석                   |  place_space_dna 테이블 준비됨
- 4순위    |  유저 DNA 자동 업데이트             |  방문 체크인 시 트리거, 장소 DNA 의존
+ 1순위    |  유저 DNA 자동 업데이트             |  방문 체크인 시 트리거 (조회 API는 완료)
+ 2순위    |  공간 탐색 (반경 검색)              |  PostGIS ST_DWithin, 네이버맵 API 연동 필요
+ 3순위    |  공개 창고 탐색/피드                |  is_public 필드 활용
+ 4순위    |  장소 DNA AI 분석                   |  AI팀 진행 중 (Supabase 직접 write)
  5순위    |  Instagram location_id 인증 추출    |  쿠키 주입 또는 네이버 API 우회 방식 필요
  6순위    |  네이버↔인스타 크로스 중복 병합     |  좌표 근접 매칭 또는 Place 병합 UI 필요
 
 
 8. 최근 수정 사항 (2026-05-10 업데이트)
 ------------------------------------------------------------
+[2026-05-10 — 공간 DNA 조회 API 2종]
+- 신규 엔드포인트 2개 (인증 필수)
+  - GET /places/{place_id}/space-dna — 장소 DNA 조회. AI팀 미분석 장소는 has_data=false 응답
+  - GET /users/me/space-dna — 내 DNA 조회. 신규 유저는 has_data=false + total_visits=0 응답
+- 신규 스키마 모듈
+  - app/schemas/dna.py: PlaceSpaceDNAResponse, UserSpaceDNAResponse
+  - mbti_axes는 dict 그대로 노출 (AI팀 키 변경에 유연)
+- 라우터 수정
+  - app/routers/places.py: PlaceSpaceDNA import + /{place_id}/space-dna 핸들러
+  - app/routers/users.py: UserSpaceDNA import + /me/space-dna 핸들러
+- 정책
+  - 빈 데이터일 때 404 대신 200 + has_data=false (신규 유저는 항상 빈 상태가 정상이라 404는 옵저버빌리티 노이즈)
+  - mbti_axes가 빈 dict({})면 None으로 정규화 (분석 시작 전/완료 후 구분)
+  - Place DNA는 인증만 요구 (Place는 글로벌 마스터, 기존 GET /places/{id}와 통일)
+- 마이그레이션 없음 (PlaceSpaceDNA / UserSpaceDNA / UserSpaceDNAHistory는 기존 모델 재사용)
+- 검증: 라우트 등록 import 테스트 PASS. Swagger UI end-to-end 검증은 사용자 액션 (시드 25건 중 1건 + DNA 없는 1건 양 케이스)
+- 후속: 유저 DNA 자동 업데이트(방문 체크인 트리거)가 다음 우선순위
+
 [2026-05-10 — 창고 멤버 초대·관리 API]
 - 신규 엔드포인트 6개
   - GET /users/search — 닉네임 prefix 검색 (본인 제외, ILIKE 'q%')

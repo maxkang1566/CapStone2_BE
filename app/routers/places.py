@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
-from app.models.models import Place, PlaceRawData, PlaceReview, User
+from app.models.models import Place, PlaceRawData, PlaceReview, PlaceSpaceDNA, User
+from app.schemas.dna import PlaceSpaceDNAResponse
 from app.schemas.place import (
     NaverPlaceUpsertRequest,
     NaverPlaceUpsertResponse,
@@ -161,4 +162,32 @@ def get_place_reviews(
         .offset((page - 1) * size)
         .limit(size)
         .all()
+    )
+
+
+@router.get("/{place_id}/space-dna", response_model=PlaceSpaceDNAResponse)
+def get_place_space_dna(
+    place_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """장소의 공간 DNA(MBTI 4축 + 신뢰도)를 반환합니다.
+
+    AI팀이 아직 분석하지 않은 장소는 `has_data=False`로 응답합니다.
+    """
+    place = db.query(Place).filter(Place.id == place_id).first()
+    if not place:
+        raise HTTPException(status_code=404, detail="장소를 찾을 수 없습니다.")
+    dna = (
+        db.query(PlaceSpaceDNA)
+        .filter(PlaceSpaceDNA.place_id == place_id)
+        .first()
+    )
+    if not dna:
+        return PlaceSpaceDNAResponse(has_data=False)
+    return PlaceSpaceDNAResponse(
+        has_data=True,
+        mbti_axes=dna.mbti_axes or None,
+        ai_summary=dna.ai_summary,
+        updated_at=dna.updated_at,
     )

@@ -4,7 +4,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
-from app.models.models import User
+from app.models.models import User, UserSpaceDNA
+from app.schemas.dna import UserSpaceDNAResponse
 from app.schemas.user import UserResponse, UserSearchResponse, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -28,6 +29,31 @@ def update_me(
     db.commit()
     db.refresh(current_user)
     return current_user
+
+
+@router.get("/me/space-dna", response_model=UserSpaceDNAResponse)
+def get_my_space_dna(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """내 공간 DNA(MBTI 4축 + 누적 방문 수)를 반환합니다.
+
+    아직 방문 체크인이 없거나 분석되지 않은 사용자는 `has_data=False`로 응답합니다.
+    """
+    dna = (
+        db.query(UserSpaceDNA)
+        .filter(UserSpaceDNA.user_id == current_user.id)
+        .first()
+    )
+    if not dna:
+        return UserSpaceDNAResponse(has_data=False, total_visits=0)
+    return UserSpaceDNAResponse(
+        has_data=True,
+        mbti_axes=dna.mbti_axes or None,
+        preferred_vibe_tags=dna.preferred_vibe_tags,
+        total_visits=dna.total_visits,
+        last_analyzed=dna.last_analyzed,
+    )
 
 
 @router.get("/search", response_model=list[UserSearchResponse])
