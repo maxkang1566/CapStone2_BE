@@ -64,6 +64,7 @@
   GET  /users/me            내 정보 조회
   PUT  /users/me            프로필 수정 (nickname, profile_image)
   GET  /users/me/space-dna  내 공간 DNA 조회 (없으면 has_data=false)
+  GET  /users/me/pins?storage_ids=&visited=&bbox=  지도 마커용 슬림 응답 (다중 storage 합치기, viewport bbox·visited 필터, 1000건 캡 + X-Truncated 헤더)
   GET  /users/search?q=&size=  닉네임 prefix 검색 (창고 초대용. 본인 제외, 카카오 임시 이메일 우회)
 
 [저장소 - /storages]
@@ -164,16 +165,87 @@ pyproject.toml               Poetry 의존성
 ------------------------------------------------------------
  우선순위  |  항목                              |  비고
 ----------+------------------------------------+-------------------------------
- 1순위    |  유저 DNA 자동 업데이트             |  방문 체크인 시 트리거 (조회 API는 완료)
+ 1순위    |  창고 멤버 토큰 초대 링크          |  기획 문서 명시 — 현재는 user_id 직접 추가만
  2순위    |  공간 탐색 (반경 검색)              |  PostGIS ST_DWithin, 네이버맵 API 연동 필요
- 3순위    |  공개 창고 탐색/피드                |  is_public 필드 활용
+ 3순위    |  공개 창고 탐색/피드 + 스크랩      |  is_public 필드 활용
  4순위    |  장소 DNA AI 분석                   |  AI팀 진행 중 (Supabase 직접 write)
  5순위    |  Instagram location_id 인증 추출    |  쿠키 주입 또는 네이버 API 우회 방식 필요
  6순위    |  네이버↔인스타 크로스 중복 병합     |  좌표 근접 매칭 또는 Place 병합 UI 필요
+ 인프라   |  /tests + ruff lint                 |  자동 회귀 방어 부재가 가장 큰 리스크
 
 
-8. 최근 수정 사항 (2026-05-10 업데이트)
+8. 최근 수정 사항 (2026-05-11 업데이트)
 ------------------------------------------------------------
+[2026-05-11 — 지도 핀 표시용 엔드포인트 (GET /users/me/pins)]
+- 배경: 클라이언트가 네이버 지도 위에 사용자 저장 spot을 핀으로 표시할
+  지도 화면이 필요. 기존 GET /storages/{id}/spots는 좌표 미포함 →
+  spot마다 GET /places/{id}를 따로 부르면 N+1. 지도 전용 슬림 응답이 필요.
+- 신규
+  - app/schemas/pin.py: PinResponse(spot_id, storage_id, place_id, name,
+    latitude, longitude, is_visited, thumbnail_url)
+  - app/routers/users.py에 list_my_pins 핸들러 + _parse_csv_ints/_parse_bbox 헬퍼
+  - scripts/_oneoff_check_pins_query.py: PostGIS dry-run (GIST 인덱스 + ST_X/Y/MakeEnvelope)
+  - scripts/_oneoff_check_pins.py: 핸들러 직접 호출 검증 (8 케이스)
+  - scripts/_oneoff_check_pins_data.py: DB 데이터 진단 (사용자/창고별 spot 분포)
+- 변경 없음: 모델/마이그레이션/기존 라우터/app/main.py (users 라우터 이미 등록됨)
+- 엔드포인트 명세
+  - GET /users/me/pins?storage_ids=1,3,5&visited=true|false&bbox=swLng,swLat,neLng,neLat
+  - 다중 storage 합치기 / viewport bbox / visited 필터 모두 한 엔드포인트
+  - 응답 1001건까지 받아 truncation 감지 → X-Truncated: true 헤더
+  - 비멤버 storage_id 1개라도 있으면 404 + inaccessible_ids
+- 정책 결정 (3중 검증)
+  - silent drop 대신 404: /storages/{id} 패턴 일관성, 디버깅 명시성
+  - 좌표 추출은 SQL ST_X/ST_Y로 raw row 매핑 (PlaceResponse computed_field
+    + to_shape는 1000건 시 ORM 메모리 비효율)
+  - 핀 클릭 시 인스타 출처는 lazy 로딩 (기존 GET /storages/{id}/spots/{sid} 재사용)
+  - bbox 필터는 GIST 인덱스가 자동 사용되므로 zero-cost 안전망
+  - 좌표 없는 spot은 응답 제외 (지도에 못 박으니 불필요)
+- 운영 Supabase 검증 (읽기만)
+  - dry-run: GIST idx_places_coordinate 존재 + ST_X/Y/MakeEnvelope 정상 동작
+  - 단일 창고(user 13/storage 13): 21건 정상 반환
+  - 다중 창고(user 23/storage 26+27): 3건(2+1) 합쳐서 반환
+  - bbox 필터: 한국 전체=21건 / 좁은 영역=0건
+  - 비멤버 storage 99999999: 404 + inaccessible_ids
+  - 부분 비멤버(26+99999999): 26 데이터 누설 없이 404
+  - 형식 오류: storage_ids=abc → 422, bbox=1,2,3 → 422
+- 미수행: truncation 케이스(1001건)는 운영 DB 시드 필요로 스킵
+- 후속: 클라이언트 팀과 응답 형식·X-Truncated 헤더 합의
+
+[2026-05-11 — 유저 DNA 자동 업데이트 트리거 (MVP P0 마무리)]
+- 배경: 조회 API(GET /users/me/space-dna)는 5/10 완료됐지만 쓰기 경로 없어
+  신규 가입자가 항상 has_data=false. MVP 4종(인스타·네이버·DNA 조회·유저 DNA 업데이트) 중
+  마지막 항목.
+- 신규 서비스: app/services/user_dna.py
+  - rebuild_user_dna(user_id, db): Spot ⋈ PlaceSpaceDNA 조인 → 4축+confidence
+    모든 키 갖춘 행만 평균 → user_space_dna upsert (ON CONFLICT user_id DO UPDATE)
+  - record_history_for_spot(user_id, spot_id, db): user_space_dna_history upsert
+    (ON CONFLICT spot_id DO UPDATE) — 멱등성 의도의 unique 제약을
+    "이 spot의 가장 최근 기여 스냅샷 1행"으로 재해석
+  - update_user_dna_after_spot_change(user_id, spot_id): BackgroundTasks 진입점.
+    SessionLocal로 새 세션 열기 (요청 세션 재사용 금지 — 요청 종료 시 close됨)
+- 라우터 수정: app/routers/spots.py
+  - PUT /{spot_id}: prev_visited 캡처 → is_visited 토글(visit↔unvisit) 변화 시
+    BackgroundTasks 등록. 메모/평점만 수정 시 재계산 안 함 (가드)
+  - DELETE /{spot_id}: visited 스팟 소프트 삭제 시만 트리거
+  - 두 핸들러 모두 added_by==current_user.id 조건 — 공유 창고 타인 spot은 미반영
+- 정책 결정 (3중 검증)
+  - 트리거: BackgroundTasks (Redis 의존 X, DNA 계산은 순수 SQL+Python)
+  - 평균: rebuild from scratch (incremental은 unvisit/삭제로 드리프트 누적)
+  - 결측치: spot 단위 전체 제외 (4축+confidence 키 모두 있어야 합산)
+  - 빈 결과: mbti_axes={} + total_visits=0 update (행 삭제 X) — 조회 API의
+    `mbti_axes or None` 정규화로 자연스럽게 has_data=false 응답
+  - 사용자 식별: Spot.added_by == current_user (공유 창고 멀티 체크인은 Phase 2)
+- 검증 도구: scripts/_oneoff_check_user_dna.py (--user-id 인자, before/after 출력)
+- 마이그레이션 없음 (기존 user_space_dna / user_space_dna_history 재사용)
+- 스모크 테스트: poetry run python -c "import app.main" PASS
+- 운영 Supabase 검증 (읽기+rebuild만)
+  - place_space_dna 0행 — AI팀 적재 전이라 평균 계산 자체는 미검증
+  - user_id=3에 rebuild 강제 실행 → 0건 합산이라도 빈 행 upsert 안전 확인
+  - 회귀 발견·수정: GET /users/me/space-dna, GET /places/{id}/space-dna가
+    "행 있음 + mbti_axes={}" 케이스에서 has_data=true 응답하던 문제 → 가드 통일
+- 후속: AI팀 DNA 적재 후 visit→unvisit→delete 시나리오 end-to-end 평균 검증
+  - 클라이언트가 PUT 호출 후 DNA 즉시 반영 안 될 수 있음(BG 1~2초 지연) — UX 영향 확인
+
 [2026-05-10 — 공간 DNA 조회 API 2종]
 - 신규 엔드포인트 2개 (인증 필수)
   - GET /places/{place_id}/space-dna — 장소 DNA 조회. AI팀 미분석 장소는 has_data=false 응답

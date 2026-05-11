@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
 from app.models.models import Spot, Storage, StorageMember, User
 from app.schemas.spot import SpotCreate, SpotResponse, SpotUpdate
+from app.services.user_dna import update_user_dna_after_spot_change
 
 router = APIRouter(prefix="/storages/{storage_id}/spots", tags=["spots"])
 
@@ -99,6 +100,7 @@ def update_spot(
     storage_id: int,
     spot_id: int,
     body: SpotUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -110,6 +112,8 @@ def update_spot(
     ).first()
     if not spot:
         raise HTTPException(status_code=404, detail="스팟을 찾을 수 없습니다.")
+
+    prev_visited = spot.is_visited
 
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(spot, field, value)
@@ -120,6 +124,18 @@ def update_spot(
 
     db.commit()
     db.refresh(spot)
+
+    # is_visited가 토글된 경우(visit↔unvisit)에만 user DNA 재계산.
+    # added_by가 본인일 때만 의미 있음 — 공유 창고에서 타인 spot을 visit해도 DNA 미반영.
+    if (
+        body.is_visited is not None
+        and body.is_visited != prev_visited
+        and spot.added_by == current_user.id
+    ):
+        background_tasks.add_task(
+            update_user_dna_after_spot_change, current_user.id, spot.id
+        )
+
     return spot
 
 
@@ -127,6 +143,7 @@ def update_spot(
 def delete_spot(
     storage_id: int,
     spot_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -138,5 +155,15 @@ def delete_spot(
     ).first()
     if not spot:
         raise HTTPException(status_code=404, detail="스팟을 찾을 수 없습니다.")
+
+    was_visited = spot.is_visited
+    owned_by_caller = spot.added_by == current_user.id
+
     spot.deleted_at = datetime.now(timezone.utc)
     db.commit()
+
+    # visited 스팟이 평균 집합에서 빠지므로 본인 spot일 때만 DNA 재계산.
+    if was_visited and owned_by_caller:
+        background_tasks.add_task(
+            update_user_dna_after_spot_change, current_user.id, spot_id
+        )

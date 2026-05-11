@@ -183,11 +183,16 @@ def get_place_space_dna(
         .filter(PlaceSpaceDNA.place_id == place_id)
         .first()
     )
-    if not dna:
-        return PlaceSpaceDNAResponse(has_data=False)
+    # 행이 없거나 AI팀이 행만 만들고 mbti_axes가 비어 있으면 동일하게 has_data=False.
+    if not dna or not dna.mbti_axes:
+        return PlaceSpaceDNAResponse(
+            has_data=False,
+            ai_summary=dna.ai_summary if dna else None,
+            updated_at=dna.updated_at if dna else None,
+        )
     return PlaceSpaceDNAResponse(
         has_data=True,
-        mbti_axes=dna.mbti_axes or None,
+        mbti_axes=dna.mbti_axes,
         ai_summary=dna.ai_summary,
         updated_at=dna.updated_at,
     )
