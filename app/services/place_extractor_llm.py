@@ -126,12 +126,13 @@ def extract_places(
     client = _get_client()
     if client is None:
         return None
-    if not caption and not list(hashtags or ()):
+    tags = list(hashtags or [])
+    if not caption and not tags:
         return None
 
     logger.debug("LLM 추출 시작 caption_len=%d", len(caption or ""))
 
-    user_msg = _build_user_message(caption or "", hashtags)
+    user_msg = _build_user_message(caption or "", tags)
 
     try:
         resp = client.messages.parse(
