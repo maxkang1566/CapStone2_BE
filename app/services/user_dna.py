@@ -20,18 +20,16 @@ from app.models.models import PlaceSpaceDNA, Spot, UserSpaceDNA, UserSpaceDNAHis
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_AXES = ("busy_calm", "calm_flashy", "modern_vintage", "premium_value")
-REQUIRED_KEYS = (*REQUIRED_AXES, "confidence")
-
-
 def _is_valid_axes(axes: dict | None) -> bool:
-    if not axes:
+    """AI 분석 결과 mbti_axes가 평균 계산에 사용 가능한지 검사.
+
+    AI팀 스킴 변경에 강건하도록 키 셋 강제는 하지 않고 "비어있지 않은 dict이며
+    모든 값이 number"인지만 본다. 평균은 모든 valid row에서 공통으로 등장한
+    키만 사용(`rebuild_user_dna` 참고).
+    """
+    if not isinstance(axes, dict) or not axes:
         return False
-    for k in REQUIRED_KEYS:
-        v = axes.get(k)
-        if not isinstance(v, (int, float)):
-            return False
-    return True
+    return all(isinstance(v, (int, float)) for v in axes.values())
 
 
 def rebuild_user_dna(user_id: int, db: Session) -> int:
@@ -58,7 +56,11 @@ def rebuild_user_dna(user_id: int, db: Session) -> int:
     if n == 0:
         new_axes: dict = {}
     else:
-        new_axes = {k: sum(a[k] for a in valid) / n for k in REQUIRED_KEYS}
+        # 모든 valid row에 공통으로 존재하는 키만 평균 (AI 스킴 변경기 안전망).
+        common_keys = set(valid[0].keys())
+        for a in valid[1:]:
+            common_keys &= set(a.keys())
+        new_axes = {k: sum(a[k] for a in valid) / n for k in common_keys}
 
     now = datetime.now(timezone.utc)
     stmt = pg_insert(UserSpaceDNA).values(

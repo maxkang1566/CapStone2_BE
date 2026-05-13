@@ -128,19 +128,24 @@ FROM place_reviews GROUP BY place_id;
 
 ## 5. DNA 결과 쓰기 — `place_space_dna`
 
-### 권장 키 명세 (운영자 ↔ AI팀 합의 필요)
+### 키 명세 (2026-05-14 동결 — AI팀 v1 알고리즘과 일치)
 
 ```json
 {
-  "busy_calm":      0.0,   // -1.0 (붐빔) ~ 1.0 (여유)
-  "calm_flashy":    0.0,   // -1.0 (차분) ~ 1.0 (화려함)
-  "modern_vintage": 0.0,   // -1.0 (최신) ~ 1.0 (빈티지)
-  "premium_value":  0.0,   // -1.0 (고급) ~ 1.0 (가성비)
-  "confidence":     0.0    //  0.0 ~ 1.0 (선택)
+  "color":   25.8,   // 0~100, 공간의 색감 점수
+  "density": 24.79,  // 0~100, 공간의 밀도 점수
+  "form":    25.15   // 0~100, 공간의 형태 점수
 }
 ```
 
-`ai_summary`: 한국어 200자 이내 권장.
+응답 본문에는 추가로 `dna_code`(예: `"SMV"`)가 동봉되지만 백엔드는 저장하지 않는다 — 약어가
+필요해지면 `mbti_axes`에 함께 넣거나 별도 컬럼 도입 검토.
+
+`ai_summary`: 한국어 200자 이내 권장(v1은 자동 생성문).
+
+> 초기 plan 메모(이 파일 git history)에는 4축+confidence(busy_calm/calm_flashy/
+> modern_vintage/premium_value/confidence, -1~1)이 적혀 있었지만 합의 없이 멈춰 있었음.
+> AI팀 v1이 실제로는 위 3축으로 출시되어 그대로 동결.
 
 ### Upsert 쿼리
 
@@ -188,7 +193,7 @@ needs_selection 3건과 not_a_place_post 2건은 시딩 대상에서 제외됨.
 - [ ] **SQL Editor**에서 `SELECT id, name FROM places LIMIT 5` 한 번 실행 — 연결 검증
 - [ ] `places.coordinate` 좌표 추출 SQL 동작 확인 (§4 참고)
 - [ ] `place_space_dna` upsert 쿼리 dry-run (id=14 다케오 호르몬으로 1건 시험 쓰기)
-- [ ] 운영자와 DNA 키 명세(영문 키 + 값 범위) 합의 → 본 메모에 동결 요청
+- [x] 운영자와 DNA 키 명세(영문 키 + 값 범위) 합의 → 본 메모에 동결 (2026-05-14, 3축 동결)
 - [ ] 알고리즘 v1 결과를 `place_space_dna`에 채우고 운영자에게 검증 요청
 
 ---
@@ -196,7 +201,7 @@ needs_selection 3건과 not_a_place_post 2건은 시딩 대상에서 제외됨.
 ## 운영자 측 To-Do
 
 - [ ] AI팀 멤버 Supabase Studio Developer 초대 (위 §1)
-- [ ] DNA 키 명세 합의 후 본 메모 동결
+- [x] DNA 키 명세 합의 후 본 메모 동결 (2026-05-14, color/density/form 3축)
 - [ ] 본 시딩 100건 실행 (현재 25건 → 75건 추가 큐레이션 후)
 - [ ] 분포 매트릭스(category_group × 행정구 × review_count_bucket) AI팀에 별도 전달
 - [ ] **알고리즘 v1 검증 후** `ai_reader`/`ai_dna_writer` 권한 분리 도입 (§2)
