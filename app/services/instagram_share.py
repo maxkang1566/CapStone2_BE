@@ -32,6 +32,7 @@ from app.services import (
     naver_local_search,
     place_disambiguator,
     place_extractor,
+    place_extractor_llm,
 )
 from app.services.naver_local_search import NaverLocalItem
 from app.services.playwright_manager import PlaywrightManager
@@ -65,6 +66,9 @@ _NON_PLACE_CATEGORY_GROUPS = frozenset({
     "여행,명소",
     "교육,학문",
     "건강,의료",
+    # 큐레이션 게시물에서 가게가 아니라 인근 지하철역(예: "고려대역 6호선")이 1순위로
+    # 잡혀 들어오는 패턴이 잦아 차단. 2026-05-14 DWtRCqpkZPt(성북구 카페 큐레이션) 진단.
+    "교통,운수",
 })
 
 
@@ -146,11 +150,19 @@ def share_post(
     # 1) 캡션·이미지 확보
     crawl, source = instagram_pipeline.fetch_post(url, db, playwright_manager=playwright_manager)
 
-    # 2) 캡션·해시태그에서 후보 추출
-    candidate_texts = place_extractor.extract_candidates(
+    # 2) 캡션·해시태그에서 후보 추출 — LLM 우선, 실패 시 정규식 폴백.
+    #    LLM은 큐레이션 게시물(N개 가게 묶음)에서 가게명을 직접 식별. 정규식은
+    #    `📍`/`|` 마커 의존이라 큐레이션 포맷에서 가게명을 놓친다.
+    candidate_texts = place_extractor_llm.extract_places(
         crawl.caption,
         hashtags=crawl.hashtags,
     )
+    used_llm = candidate_texts is not None
+    if not used_llm:
+        candidate_texts = place_extractor.extract_candidates(
+            crawl.caption,
+            hashtags=crawl.hashtags,
+        )
 
     # 3) 각 후보를 네이버 Local Search → 비-가게 카테고리(행정기관·관광명소·교육기관 등)를
     #    제외한 후 첫 결과(1순위) 1개만 채택해 합치기.
@@ -193,9 +205,19 @@ def share_post(
             crawl_source=source,
         )
 
-    # 6) 유니크 2개 이상 → LLM disambiguator로 정답 1개 시도.
-    #    캡션 자연어를 읽고 후보 풀에서 정답 1개를 고른다(환각 시 None 반환, 폴백 안전).
-    #    notes/2026-05-09 dry-run에서 이 단계 없이 saved 비율이 16%에서 정체했다.
+    # 6) 유니크 2개 이상.
+    #    LLM이 추출한 N개라면 큐레이션 게시물일 가능성이 높아 disambiguator skip하고
+    #    바로 사용자 선택으로 보낸다. disambiguator는 "정답 1개" 모델이라 N개 모두가
+    #    정답인 큐레이션에서 임의 1개를 골라 자동 저장하는 회귀를 만든다(2026-05-14 진단).
+    #    정규식 폴백 경로(used_llm=False)는 dedupe가 약해 한 가게의 다른 표현이
+    #    다중으로 살아남는 케이스가 많아 disambiguator의 1개 선택이 여전히 유효.
+    if used_llm:
+        return ShareResult(
+            status="needs_selection",
+            crawl=crawl,
+            crawl_source=source,
+            candidates=unique,
+        )
     chosen = place_disambiguator.disambiguate(crawl.caption or "", unique)
     if chosen is not None:
         spot_result = create_spot_from_naver(
