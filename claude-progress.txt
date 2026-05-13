@@ -174,8 +174,52 @@ pyproject.toml               Poetry 의존성
  인프라   |  /tests + ruff lint                 |  자동 회귀 방어 부재가 가장 큰 리스크
 
 
-8. 최근 수정 사항 (2026-05-11 업데이트)
+8. 최근 수정 사항 (2026-05-14 업데이트)
 ------------------------------------------------------------
+[2026-05-14 — LLM 기반 인스타 캡션 장소 추출기 도입]
+- 배경: 큐레이션 게시물(예: DWtRCqpkZPt — 성북구 카페 5곳)에서 정규식 추출기가
+  가게명을 0건 추출. 사용자 화면엔 노이즈 4건(고려대역 6호선·보문사·스타벅스
+  한성대입구역점·치코커피)만 표시. 원인은 _PIN_BEFORE_RE가 📍 앞 줄(🚏역명)을
+  가게명으로 잡아 실제 가게(❶ 티히커피 줄)를 놓치는 것 + _NON_PLACE_CATEGORY_GROUPS에
+  "교통,운수" 누락.
+- 신규: app/services/place_extractor_llm.py
+  - extract_places(caption, *, hashtags) -> Optional[list[str]]
+  - claude-haiku-4-5, MAX_TOKENS=1024, TIMEOUT=15s, TRUNCATE=2000 (disambiguator 통일)
+  - 응답 스키마 1필드: ExtractionResult.queries (LLM이 직접 네이버 검색용 query 작성)
+  - ANTHROPIC_API_KEY 미설정·예외·파싱 실패 → None → 호출부가 정규식 폴백
+  - 시스템 프롬프트: 큐레이션 게시물 N개 추출 / 지하철역·행정구역 제외 / 체인점은
+    지점명 포함 / 환각 금지
+- 신규 노트: notes/2026-05-14-place-extractor-llm.md (WHY 결정 + 사용자 액션)
+- 수정
+  - app/services/instagram_share.py
+    - _NON_PLACE_CATEGORY_GROUPS에 "교통,운수" 추가 (지하철역 차단, 단독 효과 1건)
+    - share_post: LLM 우선 호출 + 정규식 폴백 (used_llm 플래그)
+    - LLM이 unique≥2면 disambiguator skip하고 needs_selection 직행
+      (큐레이션에서 disambiguator가 임의 1개 자동 저장하는 회귀 방지)
+  - scripts/_oneoff_check_instagram_share_extraction.py
+    - --with-llm 플래그 추가, 정규식 vs LLM 차집합 비교 출력
+    - --with-naver 조합 시 LLM 후보 우선으로 네이버 검색
+- 정책 결정 (3중 검증)
+  - 응답 스키마 극단 단순화: kind/is_place_post/reason/address 모두 제거 — 후처리 0,
+    호출부 단순. 환각 방어는 카테고리 차단·네이버 0건·유니크 1건 3중
+  - env flag 추가 안 함 — ANTHROPIC_API_KEY 단일 토글. 비상 차단은 키 제거
+  - 빈 결과 LLM 신뢰, 폴백 X — "장소 게시물 아님" 분류 정확도 ↑. 회귀율은 운영
+    첫 2주 로그 수집 후 결정
+  - 큐레이션 disambiguator skip — used_llm=True AND unique≥2일 때만. 정규식 폴백
+    경로는 한 가게 다른 표현 dedupe 약점 때문에 기존 disambiguator 유효 유지
+- 검증
+  - import 스모크 PASS (place_extractor_llm, instagram_share)
+  - DWtRCqpkZPt(성북구 카페 5곳) end-to-end dry-run: LLM이 가게명 5개 모두 추출
+    (티히커피·마가밀·카페야벳·아일·카페 기쁜소식 + 성북구), 네이버 1순위가 모두
+    음식점·카페 카테고리로 매핑 — 정규식 노이즈(🚏역명 4건 + 도로명 8건)는 LLM
+    결과에 0건 누출
+- 후속 (범위 밖)
+  - 다중 장소 자동 저장 정책 (url 1개당 spot 1개 전제 재설계)
+  - LLM 호출 캐싱 (같은 캡션 재호출 비용 절감)
+  - 비용 가드 본격화 (월 호출 한도)
+  - 캡션 chunking (2000자 초과)
+  - LLM 응답 평가 자동화 (golden_set.csv 라벨 추가)
+
 [2026-05-11 — 지도 핀 표시용 엔드포인트 (GET /users/me/pins)]
 - 배경: 클라이언트가 네이버 지도 위에 사용자 저장 spot을 핀으로 표시할
   지도 화면이 필요. 기존 GET /storages/{id}/spots는 좌표 미포함 →
