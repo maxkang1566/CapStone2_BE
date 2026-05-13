@@ -26,6 +26,7 @@ from app.schemas.instagram import (
     InstagramShareResponse,
 )
 from app.services import instagram_pipeline, instagram_share, place_enrichment
+from app.services.space_dna_analyzer import enqueue_space_dna_analysis
 from app.services.instagram_crawler import InstagramCrawler
 from app.services.naver_local_search import NaverLocalSearchError
 from app.services.playwright_manager import PlaywrightManager
@@ -135,23 +136,25 @@ def save_instagram_spot(
     except SpotCreationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # 블로그 enrichment 잡 enqueue (best-effort).
+    # 블로그 enrichment + 공간 DNA 분석 잡 enqueue (best-effort).
     # 큐 미초기화/Redis 다운으로 enqueue가 실패해도 본 응답엔 영향이 없어야 한다.
     try:
+        rq_queue = _get_rq_queue(request)
         place_enrichment.enqueue_blog_fetch_job(
             place_id=result.spot.place_id,
             user_id=current_user.id,
-            queue=_get_rq_queue(request),
+            queue=rq_queue,
             db=db,
         )
+        enqueue_space_dna_analysis(result.spot.place_id, rq_queue)
     except HTTPException:
         logger.exception(
-            "blog enrichment enqueue 실패(큐 미초기화): place_id=%s",
+            "후속 잡 enqueue 실패(큐 미초기화): place_id=%s",
             result.spot.place_id,
         )
     except Exception:  # noqa: BLE001
         logger.exception(
-            "blog enrichment enqueue 실패: place_id=%s",
+            "후속 잡 enqueue 실패: place_id=%s",
             result.spot.place_id,
         )
 
@@ -309,26 +312,28 @@ def share_instagram_post(
 
         response = instagram_share.share_result_to_response(result)
 
-        # saved 분기에서 블로그 enrichment 잡 트리거 (best-effort).
+        # saved 분기에서 블로그 enrichment + 공간 DNA 분석 잡 트리거 (best-effort).
         # cache miss 흐름은 워커가 process_share_job에서 enqueue하지만 cache hit
         # 동기 흐름에선 누락돼 있어 reviews가 채워지지 않던 버그를 수정한다.
-        # 중복 enqueue 가능하지만 `_should_refresh`(30일) 가드로 idempotent.
+        # 중복 enqueue 가능하지만 두 잡 모두 멱등(blog: 30일 freshness, dna: _already_analyzed).
         if result.status == "saved" and result.spot is not None:
             try:
+                rq_queue = _get_rq_queue(request)
                 place_enrichment.enqueue_blog_fetch_job(
                     place_id=result.spot.place_id,
                     user_id=current_user.id,
-                    queue=_get_rq_queue(request),
+                    queue=rq_queue,
                     db=db,
                 )
+                enqueue_space_dna_analysis(result.spot.place_id, rq_queue)
             except HTTPException:
                 logger.exception(
-                    "blog enrichment enqueue 실패(큐 미초기화): place_id=%s",
+                    "후속 잡 enqueue 실패(큐 미초기화): place_id=%s",
                     result.spot.place_id,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "blog enrichment enqueue 실패: place_id=%s",
+                    "후속 잡 enqueue 실패: place_id=%s",
                     result.spot.place_id,
                 )
 

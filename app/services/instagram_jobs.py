@@ -15,6 +15,7 @@ from typing import Optional
 from app.core.database import SessionLocal
 from app.models.models import InstagramCrawlJob, User
 from app.services import instagram_pipeline, instagram_share, place_enrichment, queue
+from app.services.space_dna_analyzer import enqueue_space_dna_analysis
 from app.services.naver_blog_search import NaverBlogSearchError
 from app.services.naver_local_search import NaverLocalSearchError
 from app.services.place_enrichment import NaverBlogBlockedError
@@ -124,19 +125,21 @@ def process_share_job(job_id: str) -> None:
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
 
-            # 자동 저장 성공 시 블로그 enrichment 잡을 enqueue (best-effort).
+            # 자동 저장 성공 시 블로그 enrichment + 공간 DNA 분석 잡을 enqueue (best-effort).
             # 본 share 잡은 이미 done이므로 enqueue 실패는 로그만 남기고 통과.
             if result.status == "saved" and result.spot is not None:
                 try:
+                    q = queue.get_default_queue()
                     place_enrichment.enqueue_blog_fetch_job(
                         place_id=result.spot.place_id,
                         user_id=job.user_id,
-                        queue=queue.get_default_queue(),
+                        queue=q,
                         db=db,
                     )
+                    enqueue_space_dna_analysis(result.spot.place_id, q)
                 except Exception:  # noqa: BLE001
                     logger.exception(
-                        "blog enrichment enqueue 실패: place_id=%s",
+                        "후속 잡 enqueue 실패: place_id=%s",
                         result.spot.place_id,
                     )
         except (
