@@ -6,6 +6,7 @@ import sys
 
 import anyio
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
 from rq import Queue
 
@@ -65,6 +66,26 @@ app = FastAPI(
     title="Picklog Backend",
     description="인스타그램 장소 아카이빙 API",
     lifespan=lifespan,
+)
+
+# 프론트엔드 로컬 개발 서버에서 호출할 수 있도록 CORS 허용.
+# credentials=True를 쓰려면 origin을 명시적으로 나열해야 하므로 흔한 dev 포트만 등록한다.
+_dev_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:4200",
+    "http://127.0.0.1:4200",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_dev_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(auth_router)
