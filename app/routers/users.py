@@ -1,13 +1,19 @@
 import logging
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import asc, func
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import asc, cast, func
+from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
 from app.models.models import Place, Spot, Storage, StorageMember, User, UserSpaceDNA
-from app.schemas.dna import UserSpaceDNAResponse
+from app.schemas.dna import (
+    AXIS_TYPES,
+    UserSpaceDNAOnboardingRequest,
+    UserSpaceDNAResponse,
+)
 from app.schemas.pin import PinResponse
 from app.schemas.user import UserResponse, UserSearchResponse, UserUpdate
 
@@ -70,22 +76,54 @@ def update_me(
     return current_user
 
 
+def _normalize_axes_to_pairs(raw: dict | None) -> dict | None:
+    """저장 형태(단일 값 또는 중첩 dict)를 응답용 중첩 dict로 통일한다.
+
+    - 온보딩 POST 결과는 이미 `{axis: {type_a: x, type_b: 100-x}}` 형태.
+    - AI 자동 트리거(`rebuild_user_dna`) 결과는 `{axis: 단일 값}` 형태 — 단일 값은
+      AXIS_TYPES의 첫 요소 비율(예: color=high 비율)이라는 AI팀 확인을 따라
+      `{type_a: v, type_b: 100-v}`로 펼친다.
+
+    `100.0 - v` 같은 부동소수점 차연산은 `75.21000000000001` 같은 표현이 새므로
+    응답에 노출되는 모든 값을 소수점 둘째 자리로 반올림한다.
+    """
+    if not raw:
+        return None
+    normalized: dict[str, object] = {}
+    for axis, val in raw.items():
+        if axis not in AXIS_TYPES:
+            normalized[axis] = val
+            continue
+        type_a, type_b = AXIS_TYPES[axis]
+        if isinstance(val, dict):
+            normalized[axis] = {
+                k: round(float(v), 2) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+                for k, v in val.items()
+            }
+        elif isinstance(val, (int, float)) and not isinstance(val, bool):
+            a = float(val)
+            normalized[axis] = {type_a: round(a, 2), type_b: round(100.0 - a, 2)}
+        else:
+            normalized[axis] = val
+    return normalized
+
+
 @router.get("/me/space-dna", response_model=UserSpaceDNAResponse)
 def get_my_space_dna(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """내 공간 DNA(MBTI 4축 + 누적 방문 수)를 반환합니다.
+    """내 공간 DNA(3축: 자극 강도·분위기 밀도·트렌디함 + 누적 방문 수)를 반환합니다.
 
     아직 방문 체크인이 없거나 분석되지 않은 사용자는 `has_data=False`로 응답합니다.
+    저장된 mbti_axes가 AI 트리거의 단일 값 형태든 온보딩의 중첩 dict 형태든
+    응답에서는 항상 `{axis: {type_a: x, type_b: 100-x}}` 형태로 정규화됩니다.
     """
     dna = (
         db.query(UserSpaceDNA)
         .filter(UserSpaceDNA.user_id == current_user.id)
         .first()
     )
-    # 행이 없거나(아직 한 번도 트리거 안 됨) mbti_axes가 빈 dict(visited 0건 또는
-    # 합산 가능한 PlaceSpaceDNA가 0건)면 동일하게 has_data=False로 정규화.
     if not dna or not dna.mbti_axes:
         return UserSpaceDNAResponse(
             has_data=False,
@@ -94,10 +132,69 @@ def get_my_space_dna(
         )
     return UserSpaceDNAResponse(
         has_data=True,
-        mbti_axes=dna.mbti_axes,
+        mbti_axes=_normalize_axes_to_pairs(dna.mbti_axes),
         preferred_vibe_tags=dna.preferred_vibe_tags,
         total_visits=dna.total_visits,
         last_analyzed=dna.last_analyzed,
+    )
+
+
+@router.post(
+    "/me/space-dna",
+    response_model=UserSpaceDNAResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_my_space_dna(
+    body: UserSpaceDNAOnboardingRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """온보딩 16문항에서 프론트가 계산한 3축 비율(두 유형 dict)을 최초 1회 저장.
+
+    이미 mbti_axes가 채워져 있으면 409. AI 자동 트리거가 먼저 만든 빈 행({})은
+    UPDATE로 채워준다. WHERE mbti_axes='{}' + RETURNING으로 (a) 행 없음→INSERT,
+    (b) 빈 행→UPDATE, (c) 채워진 행→no-op 세 분기를 단일 SQL로 원자 처리.
+    """
+    now = datetime.now(timezone.utc)
+    axes = body.mbti_axes
+
+    stmt = (
+        pg_insert(UserSpaceDNA)
+        .values(
+            user_id=current_user.id,
+            mbti_axes=axes,
+            total_visits=0,
+            last_analyzed=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[UserSpaceDNA.user_id],
+            set_={
+                "mbti_axes": axes,
+                "last_analyzed": now,
+                # total_visits는 의도적으로 set_에서 제외해 기존 값을 보존한다
+                # (AI 트리거가 빈 mbti_axes로 행 + 카운트를 먼저 만든 시나리오 방어).
+            },
+            where=UserSpaceDNA.mbti_axes == cast({}, JSONB),
+        )
+        .returning(UserSpaceDNA.user_id, UserSpaceDNA.total_visits)
+    )
+    row = db.execute(stmt).first()
+
+    if row is None:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="이미 공간 DNA 온보딩이 완료되었습니다.",
+        )
+
+    db.commit()
+
+    return UserSpaceDNAResponse(
+        has_data=True,
+        mbti_axes=axes,
+        preferred_vibe_tags=None,
+        total_visits=row.total_visits,
+        last_analyzed=now,
     )
 
 
