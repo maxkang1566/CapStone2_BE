@@ -115,6 +115,8 @@ def create_invitation(
     db.add(inv)
     db.commit()
     db.refresh(inv)
+    inv.inviter = current_user
+    return _to_invitation_response(inv)
     return _to_invitation_response(inv)
 
 
