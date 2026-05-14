@@ -130,7 +130,8 @@ def list_invitations(
     current_user: User = Depends(get_current_user),
 ):
     """활성 초대 목록 (revoked/만료 제외, owner 전용). history는 후속 작업."""
-    _get_member(storage_id, db, current_user, required_roles=("owner",))
+    member = _get_member(storage_id, db, current_user, required_roles=("owner",))
+    _check_storage_alive(member.storage)
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     rows = (
