@@ -227,8 +227,7 @@ def accept_invitation(
     """토큰 수락 → 멤버 가입. 이미 멤버면 409."""
     inv = _get_invitation_by_token(token, db)
     _check_invitation_active(inv)
-    storage = db.query(Storage).filter(Storage.id == inv.storage_id).first()
-    _check_storage_alive(storage)
+    _check_storage_alive(inv.storage)
 
     existing = (
         db.query(StorageMember)
