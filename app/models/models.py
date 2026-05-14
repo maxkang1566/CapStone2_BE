@@ -61,6 +61,9 @@ class Storage(Base):
     spots: Mapped[list[Spot]] = relationship(
         "Spot", back_populates="storage", cascade="all, delete-orphan"
     )
+    invitations: Mapped[list[StorageInvitation]] = relationship(
+        "StorageInvitation", back_populates="storage", cascade="all, delete-orphan"
+    )
 
 
 class StorageMember(Base):
@@ -83,6 +86,37 @@ class StorageMember(Base):
 
     storage: Mapped[Storage] = relationship("Storage", back_populates="members")
     user: Mapped[User] = relationship("User", back_populates="storage_members")
+
+
+class StorageInvitation(Base):
+    """창고 초대 토큰. 토큰을 가진 사용자가 명시적으로 accept할 때만 멤버가 된다.
+
+    멀티유저 공유 모델: 토큰 1개를 여러 사용자가 가입에 사용 가능 (만료/취소까지).
+    동일 사용자 중복 가입은 storage_members의 uq_storage_members_storage_user가 자동 차단.
+    """
+    __tablename__ = "storage_invitations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # secrets.token_urlsafe(32) → 256-bit entropy. 평문 저장(GitHub/Slack 패턴).
+    token: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    storage_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("storages.id", ondelete="CASCADE"), nullable=False
+    )
+    invited_by: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # editor | viewer — owner는 transfer 흐름(PATCH /members/{uid})으로만
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_storage_invitations_storage_id", "storage_id"),
+    )
+
+    storage: Mapped[Storage] = relationship("Storage", back_populates="invitations")
+    inviter: Mapped[Optional[User]] = relationship("User", foreign_keys=[invited_by])
 
 
 class Place(Base):

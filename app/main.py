@@ -12,6 +12,7 @@ from rq import Queue
 from app.routers.auth import router as auth_router
 from app.routers.health import router as health_router
 from app.routers.instagram import router as instagram_router
+from app.routers.invitations import router as invitations_router
 from app.routers.places import router as places_router
 from app.routers.spots import router as spots_router
 from app.routers.storages import router as storages_router
@@ -72,6 +73,7 @@ app.include_router(storages_router)
 app.include_router(spots_router)
 app.include_router(places_router)
 app.include_router(instagram_router)
+app.include_router(invitations_router)
 app.include_router(health_router)
 
 @app.get("/")
