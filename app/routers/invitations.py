@@ -159,7 +159,8 @@ def revoke_invitation(
     current_user: User = Depends(get_current_user),
 ):
     """초대 취소 (owner 전용). 이미 취소/만료여도 멱등적으로 204."""
-    _get_member(storage_id, db, current_user, required_roles=("owner",))
+    member = _get_member(storage_id, db, current_user, required_roles=("owner",))
+    _check_storage_alive(member.storage)
 
     inv = (
         db.query(StorageInvitation)
