@@ -176,6 +176,60 @@ pyproject.toml               Poetry 의존성
 
 8. 최근 수정 사항 (2026-05-14 업데이트)
 ------------------------------------------------------------
+[2026-05-14 — 공간 DNA 온보딩 POST 엔드포인트 도입]
+- 배경: 신규 가입자는 user_space_dna 행이 없어 GET /users/me/space-dna가 항상
+  has_data=false. 첫 spot 방문 체크인 후에야 rebuild_user_dna 자동 트리거로
+  행이 생김 → 그 사이 추천·피드 화면 콜드 스타트. 프론트엔드 팀이 회원가입 직후
+  16개 온보딩 질문으로 3축 비율 사전 수집 기획 확정.
+- 신규 엔드포인트
+  - POST /users/me/space-dna — 온보딩 16문항 결과(3축 중첩 dict)를 최초 1회 INSERT
+    - 응답: 201 Created + UserSpaceDNAResponse (저장한 값 그대로 + total_visits 보존)
+    - 409: 이미 mbti_axes 채워진 행 존재 (재호출 차단)
+    - 422: 축 키 누락/추가, 유형 키 오류, 값 범위 초과, 두 유형 합≠100 (±0.01 허용)
+- 신규 스키마: app/schemas/dna.py
+  - REQUIRED_AXES = {"color", "density", "form"} (AI 동결 키 그대로)
+  - AXIS_TYPES = {"color": ("high","mild"), "density": ("dense","sparse"),
+                  "form": ("fresh","vintage")}  (첫 요소 = AI 단일 값이 가리키는 비율)
+  - UserSpaceDNAOnboardingRequest (Pydantic v2 field_validator: 키 strict + 합=100)
+- 라우터 수정: app/routers/users.py
+  - _normalize_axes_to_pairs 헬퍼: AI 단일 값 → 중첩 dict 변환 (응답 일관성)
+    + round(value, 2)로 IEEE 754 차연산 오차 정리
+  - GET /users/me/space-dna: 응답 직전에 헬퍼 적용. docstring 3축으로 정정
+  - POST /users/me/space-dna: pg_insert + ON CONFLICT DO UPDATE WHERE mbti_axes='{}'
+    + RETURNING 단일 SQL로 (a)행 없음→INSERT (b)빈 행→UPDATE (c)채워진 행→409
+    세 분기를 원자 처리 (멀티 디바이스 동시 호출 race 안전)
+  - total_visits는 UPDATE의 set_에서 의도적 제외 — AI 트리거가 빈 mbti_axes로 행을
+    먼저 만들고 visit 카운트만 누적한 시나리오에서 그 값을 보존
+- 서비스 수정: app/services/user_dna.py (옵션 2a)
+  - _flatten_onboarding_axes 헬퍼: 온보딩 중첩 dict → AI 호환 단일 값 평탄화
+    (각 축 첫 유형 비율 추출, AXIS_TYPES 따름)
+  - _average_axes 헬퍼: 평균 계산 로직 추출 (단위 테스트 가능)
+  - rebuild_user_dna: existing.total_visits==0 → is_first_rebuild → 온보딩
+    평탄화 후 valid 풀에 append → spot DNA와 함께 평균
+- 정책 결정 (3중 검증)
+  - 입력 = 중첩 dict + 합=100 검증: "각 축의 두 반대 유형 합 100" 의미 명확성 우선
+  - 영어 키 = 기존 AI 응답 유지: 한글 라벨만 매핑 → AI 마이그레이션·user_dna.py 수정
+    모두 불필요 → 작업 범위 최소
+  - 재호출 = 409: 온보딩은 1회성. PUT 멱등 의미와 충돌하므로 POST 채택
+  - AI 트리거 덮어쓰기 OK → 옵션 2a로 변경 (구현 후 사용자 재검토)
+    - rebuild_user_dna에서 첫 rebuild(total_visits==0)에 한해 온보딩 값을
+      평탄화(중첩 dict→AI 호환 단일 값)해 평균 풀에 1건 추가
+    - 두 번째 visit부터는 자동으로 spot DNA만 평균 (드리프트 없음)
+    - total_visits는 spot visit만 카운트 (온보딩은 visit 아님)
+  - GET 정규화 옵션 C (백엔드 단일 지점 변환): AI를 중첩 dict로 마이그레이션하는
+    옵션 B는 AI팀 합의·평균 로직 수정·마이그레이션 모두 필요해 MVP 일정 위협 →
+    백엔드 헬퍼 하나로 단일 값→중첩 dict 변환 + round(value, 2) 적용
+- 축 명칭 매핑 (AI팀 확인 2026-05-14)
+  - color = 자극 강도 (high ↔ mild)
+  - density = 분위기 밀도 (dense ↔ sparse)
+  - form = 트렌디함 (fresh ↔ vintage)
+- 검증: poetry run python -c "import app.main" PASS, 스키마 validator 단위 검증 (422)
+- 마이그레이션 없음 (JSONB 컬럼 구조 변경 불필요)
+- 후속
+  - 모바일팀 가이드: is_new_user=true 흐름에서만 POST 호출. 백엔드는 409 이중 방어
+  - rebuild_user_dna도 중첩 dict로 마이그레이션(옵션 B)은 MVP 이후 검토
+  - 단위 테스트는 /tests 디렉토리 부재로 미작성 (인프라 별도)
+
 [2026-05-14 — LLM 기반 인스타 캡션 장소 추출기 도입]
 - 배경: 큐레이션 게시물(예: DWtRCqpkZPt — 성북구 카페 5곳)에서 정규식 추출기가
   가게명을 0건 추출. 사용자 화면엔 노이즈 4건(고려대역 6호선·보문사·스타벅스

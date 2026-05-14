@@ -80,21 +80,70 @@
 | GET | `/users/me` | 필요 | 내 프로필 |
 | PUT | `/users/me` | 필요 | 프로필 수정 (`nickname`, `profile_image` 모두 선택) |
 | GET | `/users/me/space-dna` | 필요 | 내 공간 DNA |
+| POST | `/users/me/space-dna` | 필요 | 온보딩 16문항 결과로 공간 DNA 최초 1회 저장 |
 | GET | `/users/search` | 필요 | 닉네임 prefix 검색 (창고 초대용) |
 
 #### GET `/users/me/space-dna` — `UserSpaceDNAResponse`
 
 | 필드 | 타입 | 설명 |
 |------|------|------|
-| `has_data` | boolean | 분석된 DNA 보유 여부 |
-| `mbti_axes` | object \| null | MBTI 4축 + confidence |
+| `has_data` | boolean | 저장된 DNA 보유 여부 |
+| `mbti_axes` | object \| null | 3축 비율 (아래 명세) |
 | `preferred_vibe_tags` | object \| null | 선호 분위기 (현 미사용) |
 | `total_visits` | integer | 누적 방문 횟수 (`has_data=false`일 때 `0`) |
 | `last_analyzed` | datetime \| null | 마지막 분석 시각 |
 
 `has_data=false`이면 다른 필드는 모두 `null`/`0`. 신규 가입자도 200 응답 — 클라이언트는 `has_data` 분기로 빈 상태 처리.
 
-**`mbti_axes` 키 명세 (AI팀 동결, 2026-05-09)**: `busy_calm`(붐빔↔여유) / `calm_flashy`(차분↔화려함) / `modern_vintage`(최신↔빈티지) / `premium_value`(고급↔가성비). 모두 `[-1.0, 1.0]`. `confidence`는 `[0.0, 1.0]`.
+**`mbti_axes` 키 명세 (3축, 2026-05-14 동결)**
+
+| 영어 키 | 한글 라벨 | 두 유형 |
+|---|---|---|
+| `color` | 자극 강도 | `high` ↔ `mild` |
+| `density` | 분위기 밀도 | `dense` ↔ `sparse` |
+| `form` | 트렌디함 | `fresh` ↔ `vintage` |
+
+GET 응답의 `mbti_axes`는 저장 형태와 상관없이 항상 중첩 dict로 정규화돼 반환됩니다.
+```json
+{
+  "mbti_axes": {
+    "color":   {"high": 30.0, "mild": 70.0},
+    "density": {"dense": 60.0, "sparse": 40.0},
+    "form":    {"fresh": 80.0, "vintage": 20.0}
+  }
+}
+```
+
+내부 저장은 두 형태 중 하나입니다 — (a) 온보딩 POST가 저장한 중첩 dict, (b) AI 자동 트리거가 저장한 단일 값(`{color: 25.8, ...}`, 첫 유형 비율을 의미). GET 응답에서는 (b)를 (a) 형태로 펼쳐서 일관된 구조로 노출합니다.
+
+#### POST `/users/me/space-dna` — `UserSpaceDNAOnboardingRequest`
+
+회원가입 후 온보딩 16문항을 통해 프론트엔드가 계산한 3축 비율을 최초 1회 저장합니다.
+
+요청 본문:
+```json
+{
+  "mbti_axes": {
+    "color":   {"high": 30, "mild": 70},
+    "density": {"dense": 60, "sparse": 40},
+    "form":    {"fresh": 80, "vintage": 20}
+  }
+}
+```
+
+규칙:
+- 축 키는 정확히 `{color, density, form}` — 누락·추가 시 422.
+- 각 축의 유형 키도 위 명세와 정확히 일치 — 다른 키 시 422.
+- 각 값은 `0 ~ 100` 실수, 같은 축의 두 값 합은 `100` (`±0.01` 허용) — 위반 시 422.
+
+응답:
+- `201` — `UserSpaceDNAResponse`. 저장한 값을 그대로 반환.
+- `409` — 이미 mbti_axes가 채워진 상태 (재호출 차단).
+- `422` — 입력 검증 실패.
+
+특이 사항:
+- AI 자동 트리거(`rebuild_user_dna`)가 먼저 `mbti_axes={}` 빈 행을 만든 시나리오에서는 그 빈 행을 UPDATE로 채우고 201. 기존 `total_visits`는 보존돼 응답에 반영됨.
+- 재호출 정책상 최초 1회만 채울 수 있음. 이후 클라이언트가 사용자에게 보여줄 시점에 GET으로 확인하거나 401 분기 처리.
 
 #### GET `/users/search`
 
@@ -226,7 +275,7 @@ owner는 호출 거부 — 먼저 owner 이전 또는 storage 삭제 필요.
 | 필드 | 타입 | 설명 |
 |------|------|------|
 | `has_data` | boolean | AI팀 분석 보유 여부 |
-| `mbti_axes` | object \| null | MBTI 4축 + confidence (키는 위 `/users/me/space-dna` 참조) |
+| `mbti_axes` | object \| null | 3축 (키는 위 `/users/me/space-dna` 참조). 단일 값 형태로 저장됨 |
 | `ai_summary` | string \| null | AI 요약 (~200자 한국어) |
 | `updated_at` | datetime \| null | 최종 업데이트 |
 
