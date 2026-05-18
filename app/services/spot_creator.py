@@ -157,6 +157,85 @@ def _upsert_naver_place(naver: NaverPlaceData, db: Session) -> tuple[Place, bool
         return place, False
 
 
+def create_spot_from_naver_manual(
+    naver: NaverPlaceData,
+    storage_id: int,
+    current_user: User,
+    db: Session,
+    *,
+    image_url: Optional[str] = None,
+    user_memo: Optional[str] = None,
+    user_rating: Optional[float] = None,
+) -> SpotCreateResult:
+    """앱 내 네이버지도 검색으로 받은 장소를 Spot으로 저장한다.
+
+    `create_spot_from_naver`(인스타 흐름)와 분리한 이유:
+    - 인스타 흐름은 instagram_url 단위 중복 체크 + PlaceRawData(provider='instagram')
+      연결 로직이 본질. 매뉴얼 저장은 이 둘 다 의미 없음(IG 메타가 아예 없으므로).
+    - 분기 추가보다 새 함수가 의도가 명확하고 각자 단순.
+
+    공유하는 부분: `_check_storage_permission` + `_upsert_naver_place`.
+
+    image_url이 주어지면 Supabase Storage로 업로드해 영구 URL을 PlaceImage·
+    Spot.thumbnail_url에 저장한다(업로드 실패 시 원본 URL로 폴백 — IG와 동일).
+    이미지가 있어야 후속 공간 DNA 분석 워커가 동작한다(없으면 워커가 skip).
+    """
+    _check_storage_permission(storage_id, current_user.id, db)
+
+    place, place_created = _upsert_naver_place(naver, db)
+
+    # 같은 storage에 동일 Place Spot이 이미 있는지 (장소 단위 중복)
+    existing_spot = (
+        db.query(Spot)
+        .filter(
+            Spot.storage_id == storage_id,
+            Spot.place_id == place.id,
+            Spot.deleted_at.is_(None),
+        )
+        .first()
+    )
+    if existing_spot:
+        return SpotCreateResult(spot=existing_spot, place_created=False, already_saved=True)
+
+    saved_image_url: Optional[str] = None
+    if image_url:
+        permanent_url = image_storage.upload_naver_place_image(
+            image_url=image_url,
+            naver_place_id=naver.naver_place_id,
+        )
+        saved_image_url = permanent_url or image_url
+        # uploaded_by는 IG 자동 크롤과 달리 매뉴얼 저장이라 사용자 의도가 명확 → 채워서
+        # 누가 등록했는지 추적성을 살린다.
+        db.add(PlaceImage(
+            place_id=place.id,
+            image_url=saved_image_url,
+            source="naver",
+            is_representative=True,
+            uploaded_by=current_user.id,
+        ))
+
+    spot = Spot(
+        storage_id=storage_id,
+        place_id=place.id,
+        added_by=current_user.id,
+        instagram_url=None,
+        thumbnail_url=saved_image_url,
+        caption=None,
+        user_memo=user_memo,
+        user_rating=user_rating,
+    )
+    db.add(spot)
+    try:
+        db.commit()
+    except IntegrityError as e:
+        # 동시성: 같은 (storage_id, place_id)가 방금 다른 트랜잭션에 의해 INSERT됨,
+        # 또는 soft-deleted 행이 unique 충돌 (uq_spots_storage_place는 partial 아님).
+        db.rollback()
+        raise SpotCreationError("이미 저장된 장소입니다.") from e
+    db.refresh(spot)
+    return SpotCreateResult(spot=spot, place_created=place_created, already_saved=False)
+
+
 def create_spot_from_naver(
     naver: NaverPlaceData,
     instagram: InstagramData,

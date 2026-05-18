@@ -619,4 +619,32 @@ pyproject.toml               Poetry 의존성
   - AI팀 합의 후 place_space_dna mbti_axes 키 명세 동결 (plan v3 권장: busy_calm/calm_flashy/modern_vintage/premium_value, -1.0~1.0)
 - 참고: ~/.claude/plans/ai-delightful-marshmallow.md (검증 보강 v3)
 
+[2026-05-14 — 앱 내 네이버지도 저장 → IG 동등 사이드이펙트 지원]
+- 목적: 기존 POST /places/from-naver는 Place upsert만 해서 사진/리뷰/공간DNA가 비어있던 격차 해소.
+  앱에서 네이버지도로 검색해 저장해도 IG 흐름과 동일한 데이터 품질(사진+리뷰+DNA)이 나오게 함.
+- 신규 엔드포인트: POST /storages/{storage_id}/spots/from-naver (NaverSpotCreateRequest / NaverSpotCreateResponse)
+- 사이드이펙트 4종 (IG 흐름과 동등):
+  1. Place upsert (naver_place_id 기준) — 기존 _upsert_naver_place 재사용
+  2. PlaceImage 저장 (image_url 제공 시 Supabase Storage 업로드, source='naver', uploaded_by=current_user.id)
+  3. Spot 생성 (instagram_url=None, caption=None, user_memo/user_rating 채워짐)
+  4. 후속 RQ enqueue 2종 (best-effort): enqueue_blog_fetch_job + enqueue_space_dna_analysis
+     - 두 워커 모두 멱등 가드 내장 (_should_refresh 30일 / _already_analyzed) → already_saved 케이스에도 안전
+- 신규 파일
+  - app/dependencies/queue.py — get_rq_queue 공용 헬퍼 (IG·네이버 라우터 공유)
+- 수정
+  - app/services/image_storage.py — _upload_to_supabase 코어 일반화, namespace 인자 도입, upload_naver_place_image 추가, upload_instagram_image는 wrapper로 유지(시그니처 동일)
+  - app/services/spot_creator.py — create_spot_from_naver_manual 신규 (IG-specific 로직 없이 매뉴얼 저장 전용)
+  - app/schemas/spot.py — NaverSpotCreateRequest / NaverSpotCreateResponse 추가
+  - app/routers/storages.py — 새 핸들러 + place_enrichment / space_dna_analyzer / spot_creator import
+  - app/routers/instagram.py — _get_rq_queue 제거, app/dependencies/queue.get_rq_queue import로 일원화
+- 보존
+  - 기존 POST /places/from-naver는 그대로 (장소만 upsert 의미 유지, 기존 클라이언트 호환)
+- 알려진 한계 / 본 PR 범위 외
+  - uq_spots_storage_place는 partial 아님 → soft-deleted Spot 있으면 같은 (storage, place) 재저장 시 IntegrityError (IG도 동일 이슈)
+  - 이미지 없이 저장된 spot은 향후 사진 추가 시 DNA 재트리거 미구현
+- 검증
+  - 앱 부트스트랩 import OK, /storages/{storage_id}/spots/from-naver 라우트 등록 OK
+  - _build_storage_path('naver', '12345678', ...) → 'naver/12345678/foo.png' 정상
+  - 회귀: 기존 /places/from-naver, /instagram/save, /instagram/share 라우트 동일 등록
+
 ============================================================
