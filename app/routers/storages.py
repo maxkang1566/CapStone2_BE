@@ -1,11 +1,17 @@
+import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
+from app.dependencies.queue import get_rq_queue
 from app.models.models import Storage, StorageMember, User
+from app.schemas.spot import (
+    NaverSpotCreateRequest,
+    NaverSpotCreateResponse,
+)
 from app.schemas.storage import (
     StorageCreate,
     StorageMemberAddRequest,
@@ -14,6 +20,17 @@ from app.schemas.storage import (
     StorageResponse,
     StorageUpdate,
 )
+from app.services import place_enrichment
+from app.services.space_dna_analyzer import enqueue_space_dna_analysis
+from app.services.spot_creator import (
+    NaverPlaceData,
+    SpotCreationError,
+    StorageNotFoundError,
+    StoragePermissionError,
+    create_spot_from_naver_manual,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/storages", tags=["storages"])
 
@@ -285,3 +302,89 @@ def remove_member(
     target = _get_target_member(storage_id, user_id, db)
     db.delete(target)
     db.commit()
+
+
+# ----- 네이버지도 직접 저장 (IG 흐름과 동등한 사이드이펙트) -----
+
+
+@router.post(
+    "/{storage_id}/spots/from-naver",
+    response_model=NaverSpotCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_spot_from_naver_endpoint(
+    storage_id: int,
+    body: NaverSpotCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """앱 내 네이버지도 검색으로 선택한 장소를 storage에 Spot으로 저장한다.
+
+    IG 공유 흐름과 동등한 사이드이펙트:
+      1. Place upsert (naver_place_id 기준)
+      2. PlaceImage 저장 (image_url 있을 때 Supabase 업로드)
+      3. Spot 생성
+      4. 네이버 블로그 리뷰 수집 잡 enqueue (RQ, 멱등)
+      5. 공간 DNA 분석 잡 enqueue (RQ, 멱등)
+
+    이미 같은 (storage, place) Spot이 있으면 already_saved=True로 반환하고
+    enqueue는 그대로 호출(워커가 fresh/analyzed 가드로 skip하므로 안전).
+    """
+    naver = NaverPlaceData(
+        naver_place_id=body.naver_place_id,
+        name=body.name,
+        address=body.address,
+        latitude=body.latitude,
+        longitude=body.longitude,
+        category_group=body.category_group,
+        phone=body.phone,
+        homepage_url=body.homepage_url,
+        raw_payload=body.raw_payload,
+    )
+
+    try:
+        result = create_spot_from_naver_manual(
+            naver,
+            storage_id,
+            current_user,
+            db,
+            image_url=body.image_url,
+            user_memo=body.user_memo,
+            user_rating=body.user_rating,
+        )
+    except StorageNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except StoragePermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except SpotCreationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # 후속 잡 enqueue — best-effort. 큐 미초기화/Redis 다운이어도 본 응답엔 영향 없음.
+    # 두 enqueue는 워커 단 멱등 가드(_should_refresh, _already_analyzed)가 있어서
+    # already_saved=True 케이스에도 그대로 호출해도 안전.
+    try:
+        rq_queue = get_rq_queue(request)
+        place_enrichment.enqueue_blog_fetch_job(
+            place_id=result.spot.place_id,
+            user_id=current_user.id,
+            queue=rq_queue,
+            db=db,
+        )
+        enqueue_space_dna_analysis(result.spot.place_id, rq_queue)
+    except HTTPException:
+        logger.exception(
+            "후속 잡 enqueue 실패(큐 미초기화): place_id=%s",
+            result.spot.place_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "후속 잡 enqueue 실패: place_id=%s",
+            result.spot.place_id,
+        )
+
+    return NaverSpotCreateResponse(
+        spot=result.spot,
+        already_saved=result.already_saved,
+        place_created=result.place_created,
+    )

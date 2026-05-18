@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
+from app.dependencies.queue import get_rq_queue
 from app.models.models import (
     InstagramCrawlJob,
     Storage,
@@ -139,7 +140,7 @@ def save_instagram_spot(
     # 블로그 enrichment + 공간 DNA 분석 잡 enqueue (best-effort).
     # 큐 미초기화/Redis 다운으로 enqueue가 실패해도 본 응답엔 영향이 없어야 한다.
     try:
-        rq_queue = _get_rq_queue(request)
+        rq_queue = get_rq_queue(request)
         place_enrichment.enqueue_blog_fetch_job(
             place_id=result.spot.place_id,
             user_id=current_user.id,
@@ -163,17 +164,6 @@ def save_instagram_spot(
         already_saved=result.already_saved,
         place_created=result.place_created,
     )
-
-
-def _get_rq_queue(request: Request):
-    """앱 라이프사이클에 등록된 RQ 큐를 반환한다."""
-    queue = getattr(request.app.state, "instagram_queue", None)
-    if queue is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="작업 큐가 초기화되지 않았습니다 (Redis 연결을 확인해주세요).",
-        )
-    return queue
 
 
 @router.post("/crawl-async", response_model=InstagramCrawlJobEnqueueResponse)
@@ -215,7 +205,7 @@ def crawl_instagram_async(
     ))
     db.commit()
 
-    queue = _get_rq_queue(request)
+    queue = get_rq_queue(request)
     queue.enqueue(
         "app.services.instagram_jobs.process_crawl_job",
         job_id,
@@ -318,7 +308,7 @@ def share_instagram_post(
         # 중복 enqueue 가능하지만 두 잡 모두 멱등(blog: 30일 freshness, dna: _already_analyzed).
         if result.status == "saved" and result.spot is not None:
             try:
-                rq_queue = _get_rq_queue(request)
+                rq_queue = get_rq_queue(request)
                 place_enrichment.enqueue_blog_fetch_job(
                     place_id=result.spot.place_id,
                     user_id=current_user.id,
@@ -352,7 +342,7 @@ def share_instagram_post(
     ))
     db.commit()
 
-    queue = _get_rq_queue(request)
+    queue = get_rq_queue(request)
     queue.enqueue(
         "app.services.instagram_jobs.process_share_job",
         job_id,
