@@ -228,9 +228,26 @@ def create_spot_from_naver_manual(
     try:
         db.commit()
     except IntegrityError as e:
-        # 동시성: 같은 (storage_id, place_id)가 방금 다른 트랜잭션에 의해 INSERT됨,
-        # 또는 soft-deleted 행이 unique 충돌 (uq_spots_storage_place는 partial 아님).
+        # uq_spots_storage_place 충돌. 두 갈래로 나뉜다:
+        #   (1) 동시성 레이스 — 위 사전 체크를 동시 통과한 다른 트랜잭션이 먼저 INSERT.
+        #       이 경우 결과적으로 "이미 저장됨"이므로, 사전 체크 경로와 똑같이
+        #       기존 Spot을 재조회해 already_saved=True로 멱등 수렴시킨다.
+        #   (2) soft-deleted 행 충돌 — uq가 partial이 아니라 삭제된 Spot이 막는 경우.
+        #       이건 살아있는 Spot이 없으므로 재조회가 비고, 진짜 에러로 올린다.
         db.rollback()
+        existing_spot = (
+            db.query(Spot)
+            .filter(
+                Spot.storage_id == storage_id,
+                Spot.place_id == place.id,
+                Spot.deleted_at.is_(None),
+            )
+            .first()
+        )
+        if existing_spot:
+            return SpotCreateResult(
+                spot=existing_spot, place_created=False, already_saved=True
+            )
         raise SpotCreationError("이미 저장된 장소입니다.") from e
     db.refresh(spot)
     return SpotCreateResult(spot=spot, place_created=place_created, already_saved=False)
