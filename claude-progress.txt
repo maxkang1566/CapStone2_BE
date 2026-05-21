@@ -174,8 +174,53 @@ pyproject.toml               Poetry 의존성
  인프라   |  /tests + ruff lint                 |  자동 회귀 방어 부재가 가장 큰 리스크
 
 
-8. 최근 수정 사항 (2026-05-14 업데이트)
+8. 최근 수정 사항 (2026-05-21 업데이트)
 ------------------------------------------------------------
+[2026-05-21 — 인스타 캐러셀 전체 이미지 영구 저장]
+- 배경: /instagram/share·/instagram/save가 게시물 썸네일 1장만 PlaceImage에 저장.
+  AI팀 공간 DNA 분석이 단일 이미지(특히 자막+음식 첫 컷)에 좌우돼 결과 편향.
+  캐러셀 전체 슬라이드를 영구 저장해 분석 입력 풀을 확보.
+- 4중 검증으로 plan 보정
+  - 가설 1: Apify가 캐러셀을 어떤 키로 반환? → 핸드오프 문서 3곳(ai-team-handoff,
+    space-dna-auto-trigger, seeds/README)이 일관되게 raw_payload['images'] 평탄
+    배열 패턴 명시 → _normalize_apify 변경은 진단 후 결정(현재로선 불필요 추정).
+  - 가설 2: PlaceImage 다중 행 안전성 → 마이그레이션 8d6bab21bc7a에 unique
+    constraint 없음, is_representative 단순 boolean. 기존 백로그
+    (space-dna-auto-trigger:140 "raw_payload['images']에서 끌어와 PlaceImage로")
+    와 본 작업이 일치.
+  - 가설 3: 다운스트림 영향 → space_dna_analyzer/oneoff 스크립트 모두
+    is_representative.desc()+LIMIT 1 → 다중 행 안전. pins는 Spot.thumbnail_url
+    사용으로 PlaceImage 미참조.
+  - 가설 4: is_representative=True 중복 우려 → DB 제약 없음, 소비자 LIMIT 1로
+    동작상 안전. 본 호출은 첫 장만 True로 신규 회귀 만들지 않음.
+- 핵심 변경
+  - app/services/spot_creator.py: InstagramData.image_urls: list[str] 추가.
+    create_spot_from_naver의 단일 이미지 블록을 리스트 루프로 교체 — 전체 슬라이드
+    각각 Supabase Storage 업로드(실패 시 원본 URL 폴백), 첫 장만 is_representative=True,
+    Spot.thumbnail_url은 첫 장 영구 URL.
+  - app/services/instagram_share.py: _to_instagram_data가 image_urls=list(crawl.images)
+    전달. crawl.images는 Apify가 이미 평탄 리스트로 채움.
+  - app/schemas/instagram.py: InstagramSaveRequest.image_urls 추가, thumbnail_url은
+    폴백용으로 유지(backward compatible).
+  - app/routers/instagram.py: save_instagram_spot이 body.image_urls or [thumbnail_url]
+    로 합쳐 InstagramData 전달.
+- 신규 진단 스크립트 scripts/_oneoff_check_carousel_extraction.py
+  - place_raw_data(provider='instagram')의 캐러셀 raw 키 형태 분석
+  - images 평탄 길이 vs childPosts/sidecarChildren/carouselMedia 자식 키 존재 여부
+  - _normalize_apify 결과 길이와 raw images 길이 비교 → 누락 검출
+  - 가설 1 최종 확정 도구. read-only.
+- 정책 결정
+  - 동기 업로드 (캐러셀 평균 짧음, /share는 RQ 워커 안 실행이라 사용자 응답 무관)
+  - SpotResponse.images 노출은 범위 밖 (UI 디자인·페이지네이션 별도)
+  - PlaceImage 중복 가드 미추가 (기존 동작 유지)
+  - _normalize_apify 자식 키 폴백은 진단 후 결정
+- 마이그레이션 없음 (PlaceImage 스키마 그대로 다중 행 지원)
+- 알려진 한계 / 후속
+  - space_dna_analyzer._pick_image_url은 여전히 1장 사용 → AI 프롬프트 + 분석기
+    다중 이미지 활용 작업이 본 적재의 가치를 실제로 끌어냄 (별도 브랜치)
+  - 운영 DB 기존 25건 Place 백필 별도 (raw_payload['images'] → PlaceImage 다중 행)
+  - SpotResponse.images 노출 + 클라이언트 캐러셀 UI
+
 [2026-05-14 — 공간 DNA 온보딩 POST 엔드포인트 도입]
 - 배경: 신규 가입자는 user_space_dna 행이 없어 GET /users/me/space-dna가 항상
   has_data=false. 첫 spot 방문 체크인 후에야 rebuild_user_dna 자동 트리거로

@@ -75,6 +75,10 @@ class InstagramData:
     shortcode: Optional[str] = None
     caption: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    # 캐러셀 게시물의 전체 이미지 URL 목록. 첫 장이 대표(썸네일)이고 나머지는 보조 이미지.
+    # None이면 thumbnail_url 한 장으로 폴백 — 단일 이미지 게시물·수동 폴백 호환을 위함.
+    # AI 공간 DNA 분석이 단일 이미지 편향을 피하도록 다중 이미지를 모두 영구 저장한다.
+    image_urls: Optional[list[str]] = None
     user_memo: Optional[str] = None
     user_rating: Optional[float] = None
 
@@ -333,23 +337,36 @@ def create_spot_from_naver(
             },
         ))
 
-    # 대표 이미지 — 인스타 CDN URL은 4~5일 후 만료되므로 Supabase Storage에
-    # 업로드 후 영구 URL을 저장한다. 업로드 실패 시 원본 URL로 폴백(가용성 우선).
-    permanent_url: Optional[str] = None
-    if instagram.thumbnail_url:
+    # 이미지 영구 저장 — 인스타 CDN URL은 4~5일 후 만료되므로 Supabase Storage에
+    # 업로드 후 영구 URL을 PlaceImage로 적재한다. 업로드 실패 시 원본 URL로 폴백(가용성 우선).
+    #
+    # 캐러셀(다중 이미지) 게시물: 모든 슬라이드를 PlaceImage로 저장해 AI 공간 DNA 분석이
+    # 단일 컷(자막+음식 편향)에 좌우되지 않게 한다. 첫 장만 is_representative=True로
+    # 두어 기존 _pick_image_url(LIMIT 1 + is_representative.desc()) 소비자와 호환.
+    # Spot.thumbnail_url은 첫 장의 영구 URL — 기존 동작과 동일.
+    #
+    # image_urls가 비어있고 thumbnail_url만 있는 경우 1장짜리 리스트로 폴백(단일 이미지·수동 폴백 호환).
+    image_urls_to_save: list[str] = list(instagram.image_urls or [])
+    if not image_urls_to_save and instagram.thumbnail_url:
+        image_urls_to_save = [instagram.thumbnail_url]
+    # 같은 URL 중복은 호출 내에서만 제거(외부 dedupe 안 함 — 기존 동작 유지)
+    image_urls_to_save = list(dict.fromkeys(image_urls_to_save))
+
+    saved_image_url: Optional[str] = None
+    for idx, src_url in enumerate(image_urls_to_save):
         permanent_url = image_storage.upload_instagram_image(
-            image_url=instagram.thumbnail_url,
+            image_url=src_url,
             shortcode=instagram.shortcode,
         )
-        saved_image_url = permanent_url or instagram.thumbnail_url
+        final_url = permanent_url or src_url
         db.add(PlaceImage(
             place_id=place.id,
-            image_url=saved_image_url,
+            image_url=final_url,
             source="instagram",
-            is_representative=True,
+            is_representative=(idx == 0),
         ))
-    else:
-        saved_image_url = None
+        if idx == 0:
+            saved_image_url = final_url
 
     spot = Spot(
         storage_id=storage_id,
