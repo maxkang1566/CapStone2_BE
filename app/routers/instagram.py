@@ -27,6 +27,10 @@ from app.schemas.instagram import (
     InstagramShareResponse,
 )
 from app.services import instagram_pipeline, instagram_share, place_enrichment
+from app.services.image_place_matcher import (
+    PlaceCandidateContext,
+    match_images_to_places,
+)
 from app.services.space_dna_analyzer import enqueue_space_dna_analysis
 from app.services.instagram_crawler import InstagramCrawler
 from app.services.naver_local_search import NaverLocalSearchError
@@ -122,6 +126,53 @@ def save_instagram_spot(
     # 캐러셀 전체 이미지: 클라이언트가 image_urls를 보냈으면 그걸 우선,
     # 미제공이면 thumbnail_url 한 장으로 폴백(단일 이미지·기존 클라이언트 호환).
     image_urls = body.image_urls or ([body.thumbnail_url] if body.thumbnail_url else None)
+
+    # 다중 장소 게시물 분류: candidates_context가 제공되고 이미지·후보 모두 2개 이상이면
+    # Claude Vision 분류기로 각 이미지를 후보 장소 중 하나에 배정하고, 본 요청이 선택한
+    # 장소(naver_place_id)에 배정된 이미지만 저장한다.
+    #
+    # 분류 호출 결과가 0장이면 첫 이미지를 대표로 강제 배정 — 표시 없는 Spot 방지.
+    # 분류기는 graceful degradation(폴백: 전체를 첫 후보에 몰아넣음)이라 어떤 실패 모드든
+    # 본 흐름은 중단되지 않는다.
+    if (
+        body.candidates_context
+        and image_urls
+        and len(image_urls) >= 2
+        and len(body.candidates_context) >= 2
+    ):
+        try:
+            selected_place_index = next(
+                i for i, c in enumerate(body.candidates_context)
+                if c.naver_place_id == body.naver_place_id
+            )
+        except StopIteration:
+            # 선택된 장소가 후보 목록에 없으면 분류 자체가 의미 없음 → 그대로 전체 적재.
+            logger.warning(
+                "save: candidates_context에 선택 장소 없음 — 분류 미수행 (naver_place_id=%s)",
+                body.naver_place_id,
+            )
+            selected_place_index = None
+
+        if selected_place_index is not None:
+            context = [
+                PlaceCandidateContext(name=c.name, category=c.category)
+                for c in body.candidates_context
+            ]
+            assignments = match_images_to_places(
+                caption=body.caption or "",
+                candidates=context,
+                image_urls=image_urls,
+            )
+            assigned_indices = assignments.get(selected_place_index, [])
+            if not assigned_indices:
+                # 0장 폴백 — 첫 이미지(원본 인덱스 0)를 대표로 강제 배정.
+                logger.info(
+                    "save: matcher가 선택 장소에 0장 배정 → 첫 이미지 강제 (place=%s)",
+                    body.naver_place_id,
+                )
+                assigned_indices = [0]
+            image_urls = [image_urls[i] for i in assigned_indices]
+
     instagram = InstagramData(
         url=str(body.instagram_url),
         caption=body.caption,

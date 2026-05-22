@@ -36,6 +36,16 @@ class InstagramSaveRequest(BaseModel):
     user_memo: str | None = None
     user_rating: float | None = None
 
+    # 다중 장소 게시물 분류 컨텍스트.
+    # /share가 needs_selection으로 떨어졌을 때 클라이언트가 받은 candidates 목록을
+    # 그대로 되돌려보내면, 서버가 이미지를 장소별로 분류해 선택된 장소(naver_place_id)에
+    # 매칭된 이미지만 저장한다. 미제공 시 분류 미수행 — 모든 image_urls가 그대로 저장됨
+    # (기존 단일 장소·구 클라이언트 호환).
+    candidates_context: list["PlaceCandidate"] | None = Field(
+        None,
+        description="다중 장소 게시물 분류 컨텍스트(candidates 그대로). 미제공 시 분류 미수행.",
+    )
+
 
 class InstagramCrawlResponse(BaseModel):
     # 요청으로 받은 URL(정규화된 형태)
@@ -102,6 +112,9 @@ class InstagramCrawlData(BaseModel):
     url: HttpUrl
     caption: str | None = None
     thumbnail_url: str | None = None
+    # 캐러셀 전체 이미지 URL. needs_selection 분기에서 클라이언트가 /save로 되돌릴 때
+    # image_urls + candidates_context를 같이 보내야 다중 장소 이미지 분류가 동작한다.
+    image_urls: list[str] | None = None
 
 
 class PlaceCandidate(BaseModel):
@@ -164,3 +177,7 @@ class InstagramShareJobStatusResponse(BaseModel):
     status: Literal["pending", "done", "failed"]
     result: InstagramShareResponse | None = None
     error: str | None = None
+
+
+# PlaceCandidate가 InstagramSaveRequest보다 뒤에 정의되어 있어 forward ref를 해소해야 함.
+InstagramSaveRequest.model_rebuild()

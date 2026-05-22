@@ -174,8 +174,57 @@ pyproject.toml               Poetry 의존성
  인프라   |  /tests + ruff lint                 |  자동 회귀 방어 부재가 가장 큰 리스크
 
 
-8. 최근 수정 사항 (2026-05-21 업데이트)
+8. 최근 수정 사항 (2026-05-22 업데이트)
 ------------------------------------------------------------
+[2026-05-22 — 다중 장소 게시물: 선택된 장소의 이미지만 분류 저장]
+- 배경: 인스타 큐레이션 게시물(여러 장소 + 장소별 여러 사진)은 needs_selection으로
+  사용자가 1개를 골라도, /save가 캐러셀 전체를 그 Spot에 적재해 다른 장소 사진까지
+  같은 갤러리에 섞임. AI 공간 DNA 분석 입력도 다른 장소 사진까지 받음.
+- 5중 검증으로 plan 보정
+  - 가설 1: Anthropic SDK + messages.parse() + 비전 + 구조화 출력 → 같은 모듈 패턴
+    (place_extractor_llm, place_disambiguator)이 이미 messages.parse 사용 중. 비전
+    입력은 신규(스모크 1회로 확인).
+  - 가설 2: claude-haiku-4-5 비전 지원 → Claude 4.x 패밀리 전체 지원, 기존 모듈이
+    동일 모델 사용 중.
+  - 가설 3: /save 시점에 캐러셀 전체 이미지 접근 가능? → InstagramCrawlData가
+    thumbnail_url만 노출. **빈틈 발견 — image_urls 필드 추가가 본 PR 범위**.
+  - 가설 4: PlaceCandidate를 /save로 되돌리기 호환 → 필드들이 1:1 대응, 분류
+    컨텍스트로 그대로 재활용 가능.
+  - 가설 5: Pillow 신규 의존성 + image_storage 독립성 → grep 0건(신규). image_storage는
+    자체 httpx 다운로드·업로드, 분류 모듈과 코드 경로 완전 분리.
+- 핵심 변경
+  - app/services/image_place_matcher.py (신규): Claude haiku-4-5 vision 분류기.
+    이미지 다운로드 → PIL로 512px max dim 리사이즈 → JPEG base64 → messages.parse
+    (output_format=ImagePlaceMatchResult). 검증 깨짐/API 실패 모두 graceful
+    degradation으로 {0: 전체} 폴백 반환.
+  - app/schemas/instagram.py: InstagramSaveRequest.candidates_context 추가
+    (PlaceCandidate 리스트, 옵셔널). InstagramCrawlData.image_urls 추가
+    (needs_selection 응답에서 클라이언트가 /save로 되돌릴 수 있게). 후방 호환 위해
+    model_rebuild() 추가.
+  - app/services/instagram_share.py: share_result_to_response가 crawl_data.image_urls
+    까지 채움.
+  - app/routers/instagram.py: /save에서 candidates_context+image_urls가 둘 다 있고
+    각각 2개 이상일 때만 matcher 호출. 선택 장소(naver_place_id)에 배정된 image만
+    추려 InstagramData에 전달. 0장이면 첫 이미지를 대표로 강제 배정.
+  - pyproject.toml: pillow>=11 추가. 분류용 다운스케일에만 사용, DB 저장은 image_storage
+    가 원본 그대로 유지.
+- 정책 결정
+  - 분류용은 512px 다운스케일, DB 저장은 원본 — 게시물당 ~$0.0075 예상.
+  - temperature=0.0 명시 — 2026-05-22 로컬 e2e에서 같은 게시물 두 번 저장 시 슬라이드 1이
+    place 0/1로 갈리는 비결정성 관측. 완전 결정성은 Redis 캐시로 후속(별도 PR).
+  - /save 시점 지연 호출 — 저장 안 하는 게시물의 비용 낭비 회피.
+  - 폴백은 첫 후보에 전체 몰아넣기 — 호출부에서 0장 처리 시 첫 이미지 강제 배정.
+  - 단일 자동 저장 케이스는 손대지 않음 (matcher 미호출).
+  - 클라이언트가 candidates_context 전달 — Redis 캐시·재추출 대비 단순함, 옵셔널 호환.
+- 신규 진단 스크립트 scripts/_oneoff_test_image_matcher.py
+  - DB raw_payload 1건의 caption·images로 matcher 호출, 응답시간·비용 추정.
+  - read-only.
+- 알려진 한계
+  - 클라이언트 합류 전엔 분류 미작동(옵셔널 필드라 회귀 없음).
+  - prompt caching 미사용 (호출 빈도 늘면 도입).
+  - 평가 셋·라벨 없음 — 정성 평가만.
+  - 분류용/저장용 다운로드 중복 (데이터량 작아 후순위).
+
 [2026-05-21 — 인스타 캐러셀 전체 이미지 영구 저장]
 - 배경: /instagram/share·/instagram/save가 게시물 썸네일 1장만 PlaceImage에 저장.
   AI팀 공간 DNA 분석이 단일 이미지(특히 자막+음식 첫 컷)에 좌우돼 결과 편향.
