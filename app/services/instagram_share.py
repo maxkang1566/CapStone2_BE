@@ -269,10 +269,13 @@ def share_result_to_response(result: ShareResult) -> InstagramShareResponse:
     crawl_data: Optional[InstagramCrawlData] = None
     if result.crawl is not None:
         thumbnail = result.crawl.images[0] if result.crawl.images else None
+        # 캐러셀 전체 image_urls도 같이 노출 — needs_selection 분기에서 클라이언트가
+        # /save로 candidates_context와 함께 되돌려보내야 다중 장소 이미지 분류가 동작한다.
         crawl_data = InstagramCrawlData(
             url=result.crawl.url,
             caption=result.crawl.caption,
             thumbnail_url=thumbnail,
+            image_urls=list(result.crawl.images) if result.crawl.images else None,
         )
 
     if result.status == "not_a_place_post":
