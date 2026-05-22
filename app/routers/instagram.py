@@ -119,10 +119,14 @@ def save_instagram_spot(
         category_group=body.category_group,
         raw_payload=body.place_raw_payload,
     )
+    # 캐러셀 전체 이미지: 클라이언트가 image_urls를 보냈으면 그걸 우선,
+    # 미제공이면 thumbnail_url 한 장으로 폴백(단일 이미지·기존 클라이언트 호환).
+    image_urls = body.image_urls or ([body.thumbnail_url] if body.thumbnail_url else None)
     instagram = InstagramData(
         url=str(body.instagram_url),
         caption=body.caption,
         thumbnail_url=body.thumbnail_url,
+        image_urls=image_urls,
         user_memo=body.user_memo,
         user_rating=body.user_rating,
     )

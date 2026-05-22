@@ -14,7 +14,13 @@ class InstagramSaveRequest(BaseModel):
     # Instagram 게시물 정보 (클라이언트가 /crawl 결과에서 전달)
     instagram_url: HttpUrl = Field(..., description="인스타그램 게시물 URL")
     caption: str | None = Field(None, description="게시물 캡션")
-    thumbnail_url: str | None = Field(None, description="대표 이미지 URL")
+    thumbnail_url: str | None = Field(None, description="대표 이미지 URL (image_urls 미제공 시 폴백)")
+    # 캐러셀 게시물의 전체 이미지 URL 목록. 첫 장이 대표(썸네일).
+    # /crawl 응답의 images 배열을 그대로 넘기면 됨. None이면 thumbnail_url 한 장으로 폴백.
+    image_urls: list[str] | None = Field(
+        None,
+        description="게시물 전체 이미지 URL 목록(캐러셀 전체). 없으면 thumbnail_url로 폴백.",
+    )
 
     # 네이버 장소 정보 (사용자가 지도에서 선택 — 필수)
     naver_place_id: str = Field(..., description="네이버 장소 ID")

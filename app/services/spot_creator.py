@@ -75,6 +75,10 @@ class InstagramData:
     shortcode: Optional[str] = None
     caption: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    # 캐러셀 게시물의 전체 이미지 URL 목록. 첫 장이 대표(썸네일)이고 나머지는 보조 이미지.
+    # None이면 thumbnail_url 한 장으로 폴백 — 단일 이미지 게시물·수동 폴백 호환을 위함.
+    # AI 공간 DNA 분석이 단일 이미지 편향을 피하도록 다중 이미지를 모두 영구 저장한다.
+    image_urls: Optional[list[str]] = None
     user_memo: Optional[str] = None
     user_rating: Optional[float] = None
 
@@ -270,6 +274,30 @@ def create_spot_from_naver(
     ).first():
         raise DuplicateInstagramUrlError("이미 저장된 게시물입니다.")
 
+    # 이미지 업로드는 쓰기 트랜잭션 시작(_upsert_naver_place의 flush) 이전에 끝낸다.
+    # 캐러셀이면 슬라이드 N장 × 수백 ms~수 초 → 업로드를 INSERT 이후에 두면 Place/
+    # PlaceRawData 행에 잡힌 쓰기 락이 그 동안 유지되어 커넥션 풀 압박 + Supabase
+    # 풀러의 idle-in-transaction 타임아웃 위험이 커진다. 업로드 경로는 shortcode를
+    # 키로 쓰므로 place.id에 의존하지 않아 선행 가능.
+    #
+    # 트레이드오프: 아래 (storage, place) 중복으로 already_saved=True가 반환되는
+    # 드문 케이스에서는 업로드가 낭비될 수 있다. 그러나 Supabase 경로가 shortcode
+    # 기준이라 같은 키 덮어쓰기로 멱등이고, 이 분기 빈도는 낮아 트랜잭션 단축 이득이
+    # 더 크다.
+    image_urls_to_save: list[str] = list(instagram.image_urls or [])
+    if not image_urls_to_save and instagram.thumbnail_url:
+        image_urls_to_save = [instagram.thumbnail_url]
+    # 같은 URL 중복은 호출 내에서만 제거(외부 dedupe 안 함 — 기존 동작 유지)
+    image_urls_to_save = list(dict.fromkeys(image_urls_to_save))
+
+    final_urls: list[str] = []
+    for src_url in image_urls_to_save:
+        permanent_url = image_storage.upload_instagram_image(
+            image_url=src_url,
+            shortcode=instagram.shortcode,
+        )
+        final_urls.append(permanent_url or src_url)
+
     place, place_created = _upsert_naver_place(naver, db)
 
     # 같은 storage에 동일 Place Spot이 이미 있는지 (장소 단위 중복: 다른 IG로 이미 저장됨)
@@ -333,23 +361,20 @@ def create_spot_from_naver(
             },
         ))
 
-    # 대표 이미지 — 인스타 CDN URL은 4~5일 후 만료되므로 Supabase Storage에
-    # 업로드 후 영구 URL을 저장한다. 업로드 실패 시 원본 URL로 폴백(가용성 우선).
-    permanent_url: Optional[str] = None
-    if instagram.thumbnail_url:
-        permanent_url = image_storage.upload_instagram_image(
-            image_url=instagram.thumbnail_url,
-            shortcode=instagram.shortcode,
-        )
-        saved_image_url = permanent_url or instagram.thumbnail_url
+    # 영구 URL을 PlaceImage로 적재. 첫 장만 is_representative=True로 두어 기존
+    # _pick_image_url(LIMIT 1 + is_representative.desc()) 소비자와 호환.
+    # Spot.thumbnail_url은 첫 장의 영구 URL — 기존 동작과 동일. 업로드 실패 시
+    # 원본 URL이 final_urls에 폴백돼 있다(가용성 우선).
+    saved_image_url: Optional[str] = None
+    for idx, final_url in enumerate(final_urls):
         db.add(PlaceImage(
             place_id=place.id,
-            image_url=saved_image_url,
+            image_url=final_url,
             source="instagram",
-            is_representative=True,
+            is_representative=(idx == 0),
         ))
-    else:
-        saved_image_url = None
+        if idx == 0:
+            saved_image_url = final_url
 
     spot = Spot(
         storage_id=storage_id,

@@ -118,6 +118,9 @@ def _to_naver_place(item: NaverLocalItem) -> NaverPlaceData:
 
 def _to_instagram_data(crawl: InstagramCrawlResponse) -> InstagramData:
     thumbnail = crawl.images[0] if crawl.images else None
+    # 캐러셀 게시물은 crawl.images에 슬라이드 전체가 평탄 리스트로 들어온다(Apify 액터 응답).
+    # 다중 이미지를 모두 spot_creator로 전달해 PlaceImage 다중 행 + Supabase 영구 저장이
+    # 이뤄지게 한다. 단일 이미지 게시물이면 길이 1 리스트로 자연스럽게 동작.
     # shortcode를 채워 spot_creator가 이미 적재된 raw 행에 place_id를 UPDATE로 연결할 수 있게 한다.
     # share 흐름에서 fetch_post가 항상 먼저 호출되므로 raw는 이 시점에 존재함이 보장됨.
     return InstagramData(
@@ -125,6 +128,7 @@ def _to_instagram_data(crawl: InstagramCrawlResponse) -> InstagramData:
         shortcode=instagram_pipeline.extract_shortcode(str(crawl.url)),
         caption=crawl.caption,
         thumbnail_url=thumbnail,
+        image_urls=list(crawl.images) if crawl.images else None,
     )
 
 
