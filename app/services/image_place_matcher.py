@@ -21,6 +21,7 @@ import base64
 import io
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Literal, Optional
 
 import anthropic
@@ -44,6 +45,9 @@ _CAPTION_TRUNCATE = 2000
 _IMAGE_FETCH_TIMEOUT = 10.0
 _IMAGE_MAX_DIM = 512
 _IMAGE_JPEG_QUALITY = 85
+# 이미지 다운로드+리사이즈 병렬 워커. 인스타 캐러셀 상한 10장 기준, IO-bound라 충분히 잡아도 안전.
+# 순차 다운로드는 10장 × 10s 타임아웃 = 최대 100s 위험 — 병렬화로 압축.
+_DOWNLOAD_WORKERS = 8
 
 
 class PlaceCandidateContext(BaseModel):
@@ -105,14 +109,14 @@ confidence:
 """
 
 
-def _prepare_image_b64(url: str) -> Optional[str]:
+def _prepare_image_b64(url: str, http_client: httpx.Client) -> Optional[str]:
     """원격 이미지를 다운로드 → 512px max dim 리사이즈 → JPEG base64.
 
     분류용 임시본만 만들어 반환. DB 저장은 별도 경로(`image_storage`)에서 원본으로 처리.
-    실패 시 None.
+    실패 시 None. `http_client`는 호출자가 connection pooling을 위해 재사용한다.
     """
     try:
-        resp = httpx.get(url, timeout=_IMAGE_FETCH_TIMEOUT, follow_redirects=True)
+        resp = http_client.get(url)
     except Exception as e:  # noqa: BLE001
         logger.warning("matcher 이미지 fetch 실패: %s — %s", e.__class__.__name__, url[:80])
         return None
@@ -177,11 +181,19 @@ def match_images_to_places(
     if client is None:
         return _fallback_all_to_first(image_urls)
 
-    # 다운로드 + 리사이즈 + base64. 일부 실패는 valid_indices로 추적.
+    # 다운로드 + 리사이즈 + base64를 ThreadPoolExecutor로 병렬화 (IO-bound).
+    # 순차 처리 시 10장 × 10s 타임아웃 = 최대 100s가 가능해 /save 응답 타임아웃 위험.
+    # 단일 httpx.Client를 재사용해 connection pooling 효과도 본다.
+    # ex.map은 입력 순서를 보존하므로 valid_indices가 원본 image_urls 인덱스와 정렬됨.
     image_blocks: list[dict] = []
     valid_indices: list[int] = []
-    for idx, url in enumerate(image_urls):
-        b64 = _prepare_image_b64(url)
+    workers = min(len(image_urls), _DOWNLOAD_WORKERS)
+    with httpx.Client(timeout=_IMAGE_FETCH_TIMEOUT, follow_redirects=True) as http_client:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            b64_results = list(
+                executor.map(lambda u: _prepare_image_b64(u, http_client), image_urls)
+            )
+    for idx, b64 in enumerate(b64_results):
         if b64 is None:
             continue
         image_blocks.append({

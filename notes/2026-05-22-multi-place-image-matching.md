@@ -55,6 +55,7 @@
 - **prompt caching 미사용**: 분류 지침이 매 호출 반복 — 호출 빈도가 늘면 도입해서 절반 절감 가능.
 - **다중 동시 저장 UX 미지원**: 현재는 한 번에 1개 장소만 저장. "5개 다 저장" UX는 별도 디자인 필요. 분류 모듈은 멀티클래스 결과를 내므로 재사용 가능.
 - **다운로드 중복**: 같은 URL을 분류 모듈·image_storage가 각각 다운로드. 합치려면 download 헬퍼 도입 + image_storage 시그니처 변경 필요 — 후순위.
+- **Anthropic 클라이언트 싱글톤 thread-safety**: `_get_client()`의 `if _client is None` → 생성 사이에 멀티스레드가 동시 진입하면 인스턴스가 1~2개 더 생성될 수 있음. 기존 `place_extractor_llm.py`·`place_disambiguator.py`도 동일 패턴이라 본 PR의 신규 회귀 아님. 영향은 미미(객체 추가 생성만, 동작은 정상). 일관성 있게 고치려면 3개 모듈 동시 패치 필요 — 별도 리팩토링 브랜치로 보류. PR #8 gemini-code-assist 리뷰 참고.
 - **PlaceImage 중복 가드 없음**: 같은 image_url이 같은 place에 두 번 들어갈 가능성(PR #7 메모에도 기록). 본 PR이 신규 회귀를 만들지 않음.
 
 ## 변경 파일
