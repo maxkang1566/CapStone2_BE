@@ -74,7 +74,7 @@ def enqueue_space_dna_analysis(
     queue.enqueue(
         "app.services.space_dna_analyzer.trigger_space_dna_analysis",
         place_id,
-        kwargs={"force": force},
+        force=force,
         job_timeout=SPACE_DNA_JOB_TIMEOUT_S,
     )
 
