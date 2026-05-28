@@ -174,8 +174,44 @@ pyproject.toml               Poetry 의존성
  인프라   |  /tests + ruff lint                 |  자동 회귀 방어 부재가 가장 큰 리스크
 
 
-8. 최근 수정 사항 (2026-05-22 업데이트)
+8. 최근 수정 사항 (2026-05-28 업데이트)
 ------------------------------------------------------------
+[2026-05-28 — 장소 공간 DNA 분석: 다중 이미지 전송 전환]
+- 배경: AI팀 신규 엔드포인트 `POST /analyze/multi`(image_urls: list[str]) 개통. 기존
+  `/analyze/place`는 이미지 1장만 입력받아 캐러셀 다중 이미지 자산이 분석에 미반영.
+  본 작업은 백엔드 DNA 트리거를 다중 이미지 전송으로 전환 + AI 알고리즘 업데이트 반영
+  위해 운영 DB 전 Place 강제 재분석 백필 스크립트 추가.
+- 핵심 변경
+  - app/services/space_dna_analyzer.py
+    - `/analyze/place` → `/analyze/multi`, payload `image_url` → `image_urls`
+    - `_pick_image_url` → `_pick_image_urls` (최대 _MAX_IMAGES_PER_PLACE=10장)
+    - SPACE_DNA_TIMEOUT_S 120 → 180, SPACE_DNA_JOB_TIMEOUT_S 150 → 210
+    - `trigger_space_dna_analysis(place_id, *, force=False)`, `enqueue_space_dna_analysis(..., *, force=False)` —
+      백필 전용 `_already_analyzed` 가드 우회 메커니즘. 기본 force=False라 호출처 4곳(routers/instagram.py:205,373,
+      services/instagram_jobs.py:139, routers/storages.py:374) 변경 없음.
+    - 로깅 보강: `space_dna: analyzing place_id=X images=N force=B`
+  - scripts/_oneoff_rebackfill_space_dna_multi.py (신규): 전 Place force=True 재분석.
+    --dry-run/--limit/--via-queue 옵션. 동기 직접 호출 또는 RQ 큐 위임 둘 다 지원.
+  - scripts/_oneoff_check_space_dna_api.py: --multi 플래그(/analyze/multi dry-run) +
+    --max-images 옵션. required 키 셋 outdated 5축 → 현행 3축(color/density/form) 정정.
+- 정책 결정 (3중 검증 plan 반영)
+  - 이미지 상한 10장 — 인스타 캐러셀 max(10)와 정합. is_representative DESC, created_at ASC 상위.
+    다중 장소 분류로 한 장소당 평균 1~3장이라 상한 도달은 사실상 드묾.
+  - 타임아웃 180s — 단일 ~8s × 10 + 모델 오버헤드 대비. RQ는 +30s 여유 210s
+  - 1장도 /analyze/multi로 통일 — 분기 코드 불필요, AI 응답 스키마 동일
+  - force=True 키워드 파라미터(옵션 a) — _perform_analysis 분리(옵션 b) 대비 단일 진입점 유지
+  - 기존 분석 Place 전체 재분석 — AI 알고리즘 업데이트 반영 필요
+- 검증 결과 (운영 DB dry-run 2026-05-28)
+  - place_id=57 (2장): status=200, 39.3s, mbti_axes 3축 정상, AI 자체 DB write 확인
+  - place_id=46 (1장, image_urls=[url] 단일 원소): status=200, 19.0s — AI 서버 수용 확인
+  - 8장+ Place는 운영 시드 부재로 측정 불가. 다중 장소 분류 특성상 상한 도달 가능성 낮음
+- 마이그레이션 없음 (PlaceImage·PlaceSpaceDNA 스키마 그대로)
+- 알려진 한계 / 후속
+  - 이미지 추가 시 자동 재분석 훅 없음 (백로그 D2)
+  - 공유 창고 멤버 다중 체크인 DNA 미반영 (백로그 D3)
+  - _MAX_IMAGES_PER_PLACE=10 적정성은 운영 로그 1~2주 후 조정
+  - 운영 DB 재분석 백필 실행은 사용자 수동 액션 (본 PR엔 스크립트만)
+
 [2026-05-22 — 다중 장소 게시물: 선택된 장소의 이미지만 분류 저장]
 - 배경: 인스타 큐레이션 게시물(여러 장소 + 장소별 여러 사진)은 needs_selection으로
   사용자가 1개를 골라도, /save가 캐러셀 전체를 그 Spot에 적재해 다른 장소 사진까지

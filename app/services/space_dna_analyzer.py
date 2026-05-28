@@ -3,11 +3,11 @@
 흐름:
     1. enqueue_space_dna_analysis(place_id, queue) — 라우터/워커가 RQ 잡 등록
     2. RQ 워커가 trigger_space_dna_analysis(place_id) 실행
-       - 이미 valid한 분석이 있으면 skip(멱등)
-       - PlaceImage 1장 선택 → POST /analyze/place (120s 타임아웃)
+       - 이미 valid한 분석이 있으면 skip(멱등). force=True면 가드 우회(백필 전용).
+       - PlaceImage 다중 선택(최대 _MAX_IMAGES_PER_PLACE) → POST /analyze/multi
        - 응답 검증 후 place_space_dna upsert + place_tags 재구축
 
-AI API 응답 스키마(2026-05-14 dry-run으로 확정):
+AI API 응답 스키마(2026-05-14 dry-run으로 확정, /analyze/multi도 동일):
     {
       "place_id": int,
       "dna_code": str,            # 예: "SMV"
@@ -44,8 +44,17 @@ logger = logging.getLogger(__name__)
 SPACE_DNA_API_URL = os.getenv(
     "SPACE_DNA_API_URL", "https://hoiiiii-dna-space.hf.space"
 ).rstrip("/")
-SPACE_DNA_TIMEOUT_S = 120.0
-SPACE_DNA_JOB_TIMEOUT_S = 150
+# 다중 이미지 분석은 호출당 처리 시간이 이미지 수에 비례. 단일 이미지 ~8s 기준 10장
+# 산술 80s + 모델 오버헤드라 180s 한도 안에서 안정 동작 기대. 측정 결과에 따라 조정.
+SPACE_DNA_TIMEOUT_S = 180.0
+# RQ job_timeout은 HTTP 타임아웃 + 여유 30s(응답 파싱·DB upsert 시간).
+SPACE_DNA_JOB_TIMEOUT_S = 210
+
+# 한 장소당 AI에 보낼 이미지 최대 개수.
+# is_representative DESC, created_at ASC 정렬에서 상위 N장만 전송.
+# 인스타 캐러셀 최대치(10)와 정합. 다중 장소 분류로 한 장소당 평균 1~3장이라 상한 도달은
+# 사실상 드묾. 비용·지연·정확도 트레이드오프는 운영 로그 보고 조정.
+_MAX_IMAGES_PER_PLACE = 10
 
 # AI 응답의 태그명을 그대로 globally 노출되는 `tags` 마스터에 INSERT하기 때문에 최소 가드.
 # v1 분석에서 부적절 태그가 관측되면 운영자가 이 set을 채운다.
@@ -54,32 +63,50 @@ TAG_NAME_MIN = 1
 TAG_NAME_MAX = 30
 
 
-def enqueue_space_dna_analysis(place_id: int, queue: "Queue") -> None:
-    """호출자(라우터/워커)가 RQ 잡으로 분석을 예약."""
+def enqueue_space_dna_analysis(
+    place_id: int, queue: "Queue", *, force: bool = False
+) -> None:
+    """호출자(라우터/워커)가 RQ 잡으로 분석을 예약.
+
+    force=True는 백필 전용 — `_already_analyzed` 가드를 우회해 강제 재분석.
+    일상적 호출(인스타/네이버 저장 직후)은 기본 force=False로 멱등성 보호 유지.
+    """
     queue.enqueue(
         "app.services.space_dna_analyzer.trigger_space_dna_analysis",
         place_id,
+        force=force,
         job_timeout=SPACE_DNA_JOB_TIMEOUT_S,
     )
 
 
-def trigger_space_dna_analysis(place_id: int) -> None:
-    """RQ 워커가 실행하는 분석 본체. 별도 SessionLocal로 외부 API 호출 + DB upsert."""
+def trigger_space_dna_analysis(place_id: int, *, force: bool = False) -> None:
+    """RQ 워커가 실행하는 분석 본체. 별도 SessionLocal로 외부 API 호출 + DB upsert.
+
+    force=True면 `_already_analyzed` 가드를 우회 — AI 알고리즘 업데이트 반영용
+    강제 재분석 백필에서만 사용. 라우터·워커 일반 호출 경로는 기본 force=False.
+    """
     db = SessionLocal()
     try:
-        if _already_analyzed(place_id, db):
+        if not force and _already_analyzed(place_id, db):
             logger.info("space_dna: skip place_id=%d already analyzed", place_id)
             return
 
-        image_url = _pick_image_url(place_id, db)
-        if not image_url:
+        image_urls = _pick_image_urls(place_id, db)
+        if not image_urls:
             logger.warning("space_dna: skip place_id=%d no PlaceImage", place_id)
             return
 
+        logger.info(
+            "space_dna: analyzing place_id=%d images=%d force=%s",
+            place_id,
+            len(image_urls),
+            force,
+        )
+
         with httpx.Client(timeout=SPACE_DNA_TIMEOUT_S) as client:
             resp = client.post(
-                f"{SPACE_DNA_API_URL}/analyze/place",
-                json={"place_id": place_id, "image_url": image_url},
+                f"{SPACE_DNA_API_URL}/analyze/multi",
+                json={"place_id": place_id, "image_urls": image_urls},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -134,14 +161,20 @@ def _already_analyzed(place_id: int, db: Session) -> bool:
     return bool(row) and _is_valid_axes(row[0])
 
 
-def _pick_image_url(place_id: int, db: Session) -> Optional[str]:
-    img = (
+def _pick_image_urls(place_id: int, db: Session) -> list[str]:
+    """한 장소의 이미지 URL을 최대 _MAX_IMAGES_PER_PLACE개까지 반환.
+
+    정렬: is_representative DESC (대표 이미지 먼저), created_at ASC (오래된 순).
+    이미지 없으면 빈 리스트 반환.
+    """
+    rows = (
         db.query(PlaceImage.image_url)
         .filter(PlaceImage.place_id == place_id)
         .order_by(PlaceImage.is_representative.desc(), PlaceImage.created_at.asc())
-        .first()
+        .limit(_MAX_IMAGES_PER_PLACE)
+        .all()
     )
-    return img[0] if img else None
+    return [r[0] for r in rows]
 
 
 def _sanitize_tag_name(name: object) -> Optional[str]:
