@@ -149,8 +149,10 @@ def get_place_images(
     정렬: `is_representative DESC`(대표 먼저), `created_at ASC`(저장된 순) —
     Space DNA 분석기의 `_pick_image_urls`와 동일 정렬이라 항상 대표 이미지가 첫 번째.
     """
-    place = db.query(Place).filter(Place.id == place_id).first()
-    if not place:
+    # 존재 확인엔 Place.id만 조회한다. Place 전체를 로드하면 PostGIS Geometry인
+    # coordinate 컬럼까지 끌어와 단순 존재 체크에 불필요한 오버헤드가 붙는다.
+    place_exists = db.query(Place.id).filter(Place.id == place_id).first() is not None
+    if not place_exists:
         raise HTTPException(status_code=404, detail="장소를 찾을 수 없습니다.")
     return (
         db.query(PlaceImage)

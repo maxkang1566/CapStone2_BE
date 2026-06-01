@@ -44,7 +44,36 @@
 - "다중 저장"을 구현했다고 "다중 조회"가 따라오지 않는다. 정규화된 `PlaceImage` 테이블과 비정규화된 `Spot.thumbnail_url`이 분리돼 있어, write 경로만 다중화하면 read는 여전히 대표 1장에 묶인다. 새 컬렉션을 도입할 때 **read surface까지 같이 점검**해야 함.
 - 적대적 검증(refuter)이 유효했다: "다중 이미지를 리턴하는 GET이 없다"는 주장을 깨려고 전 디렉토리를 뒤졌지만, 클라이언트로 가는 배열 이미지는 전부 **라이브 크롤 결과**(`InstagramCrawlResponse.images`)였지 저장된 `place_images`가 아님을 확인.
 
+## 코드 리뷰 반영 (2026-06-01, PR #10 — gemini-code-assist, medium)
+
+리뷰의 두 지적 모두 실코드·마이그레이션 확인 후 사실로 검증돼 반영함.
+
+1. **존재 확인 최적화 (범위 내)**: `db.query(Place).filter(...).first()`는 `Place` 전체를
+   로드하는데, `Place`엔 PostGIS `Geometry`인 `coordinate` 컬럼이 있어 단순 존재 체크에
+   불필요한 오버헤드. 게다가 핸들러에서 `place`는 오직 존재 확인에만 쓰여 재사용 0 →
+   `db.query(Place.id).filter(...).first() is not None`으로 교체(순수 이득).
+   - 참고: 같은 파일의 다른 4개 조회 핸들러(`get_place` 등)는 여전히 전체 로드 패턴.
+     일괄 변경은 본 PR 범위 밖이라 미적용(diff 비대화 방지).
+2. **place_images.place_id 인덱스 추가 (리뷰는 범위 외로 표기했으나 반영)**:
+   - 검증: 테이블 생성 마이그레이션(`8d6bab21bc7a`)에 FK만 있고 인덱스 없음 확인.
+     Postgres는 FK 참조 컬럼에 인덱스를 자동 생성하지 않음 → `WHERE place_id=X`가 seq scan.
+   - **선례**: `place_reviews`는 동일 패턴에 `ix_place_reviews_place_id`(`5fe6c16c6978`)를
+     이미 만들어 둠. 즉 `place_images`만 누락된 것 → 컨벤션 정합성 차원에서도 추가가 맞음.
+   - 수혜자 2곳: 새 GET 엔드포인트 + `space_dna_analyzer._pick_image_urls`(같은 필터).
+   - 신규 마이그레이션 `f3a9c1e7b204_add_place_images_place_id_index`.
+     모델에도 `__table_args__ = (Index("ix_place_images_place_id", "place_id"),)` 선언해
+     autogenerate 드리프트 방지.
+   - 검증: `alembic heads` 단일 head(f3a9c1e7b204), 오프라인 SQL
+     `CREATE INDEX ix_place_images_place_id ON place_images (place_id)` 확인(prod 미접촉).
+
+## 배운 점 (추가)
+
+- Postgres FK는 인덱스를 자동 생성하지 않는다 — 참조 컬럼으로 자주 필터하는 자식 테이블은
+  명시 인덱스가 필요. 같은 코드베이스 안에서도 `place_reviews`엔 있고 `place_images`엔
+  없던 불일치가 그 증거. 새 자식 테이블 추가 시 체크리스트로 둘 것.
+
 ## 상태
 
-- 코드 작성 완료, import·라우트 등록·스키마 필드 검증 완료 (`/places/{place_id}/images` 등록 확인).
-- **커밋 보류** (사용자 요청) — DB 실데이터 대상 동작 확인(다중 이미지 place로 호출 → N행 정렬 반환) 후 커밋 예정.
+- 엔드포인트 + 리뷰 반영(존재 확인 최적화 + 인덱스 마이그레이션) 완료, 실DB 동작 검증 완료.
+- 브랜치 `feat/place-images-get-endpoint`, PR #10. 인덱스 마이그레이션은 배포 시
+  `alembic upgrade head`로 적용 필요(미적용 상태여도 엔드포인트 정상 동작 — 인덱스는 성능용).
