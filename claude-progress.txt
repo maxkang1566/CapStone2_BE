@@ -91,6 +91,7 @@
 [장소 - /places]
   GET  /places?q=검색어              장소 검색 (이름 기반, 페이징)
   GET  /places/{id}                  장소 상세 조회
+  GET  /places/{id}/images           장소 이미지 전체 (is_representative DESC, created_at ASC — 대표 먼저)
   GET  /places/{id}/space-dna        장소 공간 DNA 조회 (없으면 has_data=false)
 
 [인스타그램 - /instagram]
@@ -174,8 +175,49 @@ pyproject.toml               Poetry 의존성
  인프라   |  /tests + ruff lint                 |  자동 회귀 방어 부재가 가장 큰 리스크
 
 
-8. 최근 수정 사항 (2026-05-28 업데이트)
+8. 최근 수정 사항 (2026-06-01 업데이트)
 ------------------------------------------------------------
+[2026-06-01 — 장소 다중 이미지 GET 엔드포인트 추가]
+- 배경: 저장 경로는 이미 장소당 다중 이미지를 지원(place_images 다중 행 — IG 캐러셀
+  spot_creator.py:364-377, 네이버 직접 저장, 다중 장소 분류)하지만, 읽기 경로가 전부
+  단일/없음이었다. 4개 read surface 전수 감사 + 적대적 검증(refuted=false)으로 확인:
+  - PlaceResponse: 이미지 필드 자체 없음(0장) → GET /places, GET /places/{id}
+  - SpotResponse.thumbnail_url: 1장 → GET .../spots, .../spots/{id}
+  - PinResponse.thumbnail_url: 1장 → GET /me/pins
+  - IG /save·/share·/share-jobs: spot.thumbnail_url 1장
+  다중 PlaceImage를 list로 읽는 곳은 내부 Space DNA 분석기(_pick_image_urls)뿐 →
+  Place.images 관계가 write-only 상태였다. 2026-05-21 노트의 후속(SpotResponse.images
+  노출 백로그)을 전용 엔드포인트 형태로 해소.
+- 핵심 변경
+  - app/schemas/place.py: PlaceImageResponse 신설 (id, place_id, image_url, source,
+    is_representative, created_at)
+  - app/routers/places.py: GET /places/{place_id}/images 추가 + PlaceImage import.
+    is_representative DESC, created_at ASC 정렬로 list[PlaceImageResponse] 반환,
+    place 미존재 시 404. Space DNA _pick_image_urls와 동일 정렬이라 [0]이 항상 대표.
+- 설계 결정 (3안 중 전용 엔드포인트 채택)
+  - (A) 전용 엔드포인트 ← 채택: 기존 스키마 무수정, pin.py "슬림 마커 + 상세 lazy"
+    의도와 일관, 검색·리스트 페이로드 영향 0.
+  - (B) PlaceResponse.images: GET /places 검색 리스트에도 따라붙어 N+1/페이로드 부담.
+  - (C) SpotResponse.place_images: list_spots에 장소 이미지 중복 전송.
+  - 권한은 다른 places.py 조회 핸들러와 동일(인증만) — Place는 전역 공유 엔티티.
+- 검증 (실DB, 2026-06-01)
+  - place_id=74(이미지 10장)로 TestClient 호출: 200, 10장 전부 반환, [0]만 rep=True,
+    그룹 내 created ASC, DB 카운트(10)=응답 카운트(10), 없는 place_id → 404.
+  - 일회성 검증 스크립트는 정리 원칙대로 삭제.
+- 코드 리뷰 반영 (gemini-code-assist, medium / PR #10)
+  - (1) 존재 확인을 Place 전체 로드 → Place.id만 조회로 변경. Place엔 PostGIS
+    Geometry(coordinate) 컬럼이 있어 단순 존재 체크에 전체 행 로드는 오버헤드.
+  - (2) place_images.place_id 인덱스 추가 — Postgres는 FK 참조 컬럼에 인덱스를
+    자동 생성하지 않음. GET /places/{id}/images + space_dna_analyzer._pick_image_urls
+    둘 다 seq scan 회피. place_reviews(ix_place_reviews_place_id) 선례와 동일.
+- 마이그레이션: f3a9c1e7b204_add_place_images_place_id_index
+  (CREATE INDEX ix_place_images_place_id ON place_images(place_id)).
+  배포 시 alembic upgrade head 필요 (69행 소규모라 즉시 완료).
+- 발견한 데이터 특이점 (범위 외): place_id 44·52·57·62는 이미지 2장에 is_representative
+  True가 2개. 한 장소가 서로 다른 흐름(IG 1 + 네이버 1, 또는 네이버 2)으로 저장되면
+  대표가 중복됨. 본 GET은 깨지지 않으나(created 빠른 쪽이 [0]) "장소당 대표 1장"
+  불변식 미보장은 별개 이슈로 후속 검토.
+
 [2026-05-28 — 장소 공간 DNA 분석: 다중 이미지 전송 전환]
 - 배경: AI팀 신규 엔드포인트 `POST /analyze/multi`(image_urls: list[str]) 개통. 기존
   `/analyze/place`는 이미지 1장만 입력받아 캐러셀 다중 이미지 자산이 분석에 미반영.

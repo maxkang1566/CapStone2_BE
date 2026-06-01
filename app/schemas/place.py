@@ -42,6 +42,17 @@ class PlaceResponse(BaseModel):
         return to_shape(self.coordinate).x
 
 
+class PlaceImageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    place_id: int
+    image_url: str
+    source: Optional[str]
+    is_representative: bool
+    created_at: datetime
+
+
 class PlaceRawDataResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

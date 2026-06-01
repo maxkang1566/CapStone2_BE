@@ -237,6 +237,13 @@ class PlaceImage(Base):
     is_representative: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
 
+    __table_args__ = (
+        # place_id 단일 인덱스 — 장소별 이미지 조회(GET /places/{id}/images,
+        # space_dna_analyzer._pick_image_urls)가 seq scan 타지 않게. FK는 인덱스를
+        # 자동 생성하지 않아 별도 선언. place_reviews(ix_place_reviews_place_id)와 동일.
+        Index("ix_place_images_place_id", "place_id"),
+    )
+
     place: Mapped[Place] = relationship("Place", back_populates="images")
     raw_data: Mapped[Optional[PlaceRawData]] = relationship("PlaceRawData", back_populates="images")
 

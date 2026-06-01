@@ -5,11 +5,19 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
-from app.models.models import Place, PlaceRawData, PlaceReview, PlaceSpaceDNA, User
+from app.models.models import (
+    Place,
+    PlaceImage,
+    PlaceRawData,
+    PlaceReview,
+    PlaceSpaceDNA,
+    User,
+)
 from app.schemas.dna import PlaceSpaceDNAResponse
 from app.schemas.place import (
     NaverPlaceUpsertRequest,
     NaverPlaceUpsertResponse,
+    PlaceImageResponse,
     PlaceRawDataResponse,
     PlaceResponse,
     PlaceReviewResponse,
@@ -123,6 +131,35 @@ def get_place(
     if not place:
         raise HTTPException(status_code=404, detail="장소를 찾을 수 없습니다.")
     return place
+
+
+@router.get("/{place_id}/images", response_model=list[PlaceImageResponse])
+def get_place_images(
+    place_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """특정 장소에 저장된 이미지 전체를 반환합니다.
+
+    한 장소는 인스타 캐러셀·다중 장소 분류·네이버 직접 저장 등으로 여러 장의
+    이미지를 가질 수 있다(`place_images` 다중 행). 기존 `Spot.thumbnail_url`/
+    `PinResponse.thumbnail_url`은 대표 1장만 노출하므로, 갤러리 표시는 이 엔드포인트로
+    lazy 로딩한다.
+
+    정렬: `is_representative DESC`(대표 먼저), `created_at ASC`(저장된 순) —
+    Space DNA 분석기의 `_pick_image_urls`와 동일 정렬이라 항상 대표 이미지가 첫 번째.
+    """
+    # 존재 확인엔 Place.id만 조회한다. Place 전체를 로드하면 PostGIS Geometry인
+    # coordinate 컬럼까지 끌어와 단순 존재 체크에 불필요한 오버헤드가 붙는다.
+    place_exists = db.query(Place.id).filter(Place.id == place_id).first() is not None
+    if not place_exists:
+        raise HTTPException(status_code=404, detail="장소를 찾을 수 없습니다.")
+    return (
+        db.query(PlaceImage)
+        .filter(PlaceImage.place_id == place_id)
+        .order_by(PlaceImage.is_representative.desc(), PlaceImage.created_at.asc())
+        .all()
+    )
 
 
 @router.get("/{place_id}/raw-data", response_model=list[PlaceRawDataResponse])
