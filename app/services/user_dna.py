@@ -103,7 +103,7 @@ def rebuild_user_dna(user_id: int, db: Session) -> int:
         .join(Spot, Spot.place_id == PlaceSpaceDNA.place_id)
         .filter(
             Spot.added_by == user_id,
-            Spot.visited_at.is_not(None),
+            Spot.is_visited.is_(True),
             Spot.deleted_at.is_(None),
         )
         .all()
