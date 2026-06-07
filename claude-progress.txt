@@ -175,8 +175,31 @@ pyproject.toml               Poetry 의존성
  인프라   |  /tests + ruff lint                 |  자동 회귀 방어 부재가 가장 큰 리스크
 
 
-8. 최근 수정 사항 (2026-06-01 업데이트)
+8. 최근 수정 사항 (2026-06-07 업데이트)
 ------------------------------------------------------------
+[2026-06-07 — Unvisit 시 유저 공간 DNA 미반영 버그 수정]
+- 배경: 스팟 PUT으로 is_visited를 True→False 토글하면 BackgroundTask(update_user_dna_after_spot_change)는
+  정상 트리거되지만 사용자 DNA가 그 장소를 여전히 반영한 채 남는 회귀. 한 번이라도 visit된 spot은
+  visited_at 컬럼이 남아 있어 rebuild_user_dna의 평균 풀에서 빠지지 않았던 게 원인.
+- 원인
+  - PUT 핸들러는 is_visited=True 토글 시에만 visited_at을 자동 세팅(spots.py:122-123). False로 토글
+    해도 visited_at은 유지 — "첫 방문 시각" 메타데이터 보존이 의도된 동작.
+  - 그러나 rebuild_user_dna는 평균 풀 필터를 visited_at IS NOT NULL로 두고 있었음(user_dna.py:106).
+    결과: unvisit 후에도 같은 row가 다시 평균에 들어가 BG가 동일 결과를 재계산.
+- 핵심 변경 (1줄)
+  - app/services/user_dna.py:106 — Spot.visited_at.is_not(None) → Spot.is_visited.is_(True)
+  - scripts/_oneoff_check_user_dna.py:55 — 동일 필터 동기화
+- 설계 결정 (3중 적대 검증 결과)
+  - is_visited를 토글 source of truth로 채택 — PIN 조회(spots.py:268), DELETE 가드(spots.py:159)도
+    이미 is_visited 기준. visited_at은 "첫 방문 시각" 메타데이터로 역할 분리 유지.
+  - 대안(visited_at clear) 기각 — 첫 방문 시각 정보 휘발, 토글마다 덮어쓰기.
+  - spots.is_visited 인덱스 추가는 본 작업 범위 외 — added_by FK가 충분히 selective.
+- 검증 (TestClient oneoff, 통과 후 스크립트 정리)
+  - 시나리오 A: 단일 spot visit → unvisit → 재visit. total_visits 1→0→1, mbti_axes 반영/해제/복귀.
+  - 시나리오 B: 멀티 spot visit 후 1개만 unvisit. 평균이 남은 spot 값으로 줄어드는지 확인.
+  - 시나리오 C: visit된 spot에 user_memo만 PUT. BG 트리거 미발생 (가드 회귀 방지).
+- 노트: notes/2026-06-07-dna-unvisit-bug-fix.md
+
 [2026-06-01 — 장소 다중 이미지 GET 엔드포인트 추가]
 - 배경: 저장 경로는 이미 장소당 다중 이미지를 지원(place_images 다중 행 — IG 캐러셀
   spot_creator.py:364-377, 네이버 직접 저장, 다중 장소 분류)하지만, 읽기 경로가 전부

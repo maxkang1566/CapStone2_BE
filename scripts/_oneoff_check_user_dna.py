@@ -52,7 +52,7 @@ def main() -> None:
             db.query(Spot)
             .filter(
                 Spot.added_by == args.user_id,
-                Spot.visited_at.is_not(None),
+                Spot.is_visited,
                 Spot.deleted_at.is_(None),
             )
             .count()
