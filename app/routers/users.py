@@ -163,6 +163,7 @@ def create_my_space_dna(
         .values(
             user_id=current_user.id,
             mbti_axes=axes,
+            onboarding_axes=axes,  # 영구 시드 — rebuild가 덮어쓰지 않는 별도 컬럼
             total_visits=0,
             last_analyzed=now,
         )
@@ -170,6 +171,7 @@ def create_my_space_dna(
             index_elements=[UserSpaceDNA.user_id],
             set_={
                 "mbti_axes": axes,
+                "onboarding_axes": axes,
                 "last_analyzed": now,
                 # total_visits는 의도적으로 set_에서 제외해 기존 값을 보존한다
                 # (AI 트리거가 빈 mbti_axes로 행 + 카운트를 먼저 만든 시나리오 방어).

@@ -43,7 +43,7 @@
   place_space_dna    - 장소 공간DNA (mbti_axes(JSONB), ai_summary)
   tags               - 태그 마스터 (name)
   place_tags         - 장소-태그 연결 (place_id, tag_id, score)
-  user_space_dna     - 유저 공간DNA (mbti_axes(JSONB), preferred_vibe_tags, total_visits)
+  user_space_dna     - 유저 공간DNA (mbti_axes(JSONB), onboarding_axes(JSONB, 영구 설문 시드), preferred_vibe_tags, total_visits)
   user_space_dna_history - 유저 DNA 변화 이력 (spot_id, mbti_axes_snapshot)
 
 핵심 설계 패턴:
@@ -177,6 +177,29 @@ pyproject.toml               Poetry 의존성
 
 8. 최근 수정 사항 (2026-06-07 업데이트)
 ------------------------------------------------------------
+[2026-06-07 — 온보딩 설문 DNA 평균 영구 반영 (옵션 1)]
+- 배경: 회원가입 설문으로 정한 초기 DNA가 첫 방문 장소 DNA로 사실상 덮어써졌다. 온보딩 값이
+  rebuild_user_dna가 덮어쓰는 같은 mbti_axes 컬럼에 저장됐고, 옛 옵션 2a는 첫 rebuild(total_visits=0)
+  1회만 섞은 뒤 그 rebuild가 컬럼을 덮어써 원본 설문이 영구 소실 → 방문 2곳째부터 설문 0%.
+- 해결 (사용자 결정: 동등 1표 영구 반영, 방문 N곳이면 설문 1/(N+1)로 자연 감쇠)
+  - user_space_dna에 onboarding_axes(JSONB, nullable) 신규 컬럼 — 설문 원본 영구 보관, rebuild 무관.
+    마이그레이션 b2e8f4a1c739. 백필: total_visits=0 AND mbti_axes!='{}'인 복구 가능 코호트만.
+  - 온보딩 POST(users.py)가 mbti_axes(표시용)+onboarding_axes(영구 시드) 둘 다 기록. where 가드/409 유지.
+  - rebuild_user_dna(user_dna.py)에서 is_first_rebuild 한방 로직 제거 → onboarding_axes 있으면 항상
+    평탄화해 평균 풀에 1건 포함. total_visits는 방문 spot 수만(온보딩 미포함).
+- 핵심 변경
+  - migrations/versions/b2e8f4a1c739_add_onboarding_axes_to_user_space_dna.py (신규)
+  - app/models/models.py: UserSpaceDNA.onboarding_axes 추가
+  - app/routers/users.py: 온보딩 upsert에 onboarding_axes (values+set_)
+  - app/services/user_dna.py: rebuild 영구 블렌딩 + docstring 옵션 2a→1
+- 검증 (로컬 Docker DB, oneoff self-contained, 통과 후 삭제)
+  - 마이그레이션 upgrade/downgrade 왕복 OK.
+  - 7항목 ALL PASS: 온보딩 저장/재호출 409 / X visit avg(설문,X) / Y visit 설문 기여 지속 /
+    history snapshot / X,Y unvisit 시 설문 단독 복귀 / 온보딩 없는 유저 NULL 안전.
+- 배포 주의: Railway는 마이그레이션 자동 실행 없음(Dockerfile uvicorn 직실행). 운영 Supabase에
+  alembic upgrade head 수동 실행 필요 — 마이그레이션 먼저, 코드 배포 나중.
+- 노트: notes/2026-06-07-onboarding-dna-permanent-seed.md
+
 [2026-06-07 — Unvisit 시 유저 공간 DNA 미반영 버그 수정]
 - 배경: 스팟 PUT으로 is_visited를 True→False 토글하면 BackgroundTask(update_user_dna_after_spot_change)는
   정상 트리거되지만 사용자 DNA가 그 장소를 여전히 반영한 채 남는 회귀. 한 번이라도 visit된 spot은
