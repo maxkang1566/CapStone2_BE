@@ -4,10 +4,11 @@
 사용자가 added_by인 visited 스팟 전체의 PlaceSpaceDNA를 모아 평균을 다시 계산한다.
 unvisit·삭제로 인한 드리프트를 막기 위해 incremental 누적 대신 매번 rebuild.
 
-옵션 2a (2026-05-14): 첫 rebuild 시점(`total_visits==0`)에는 user_space_dna에
-이미 들어있는 온보딩 값을 평균 풀에 1건 추가한다. 온보딩은 콜드 스타트 보조 신호로
-첫 valid 방문 1회에만 묻혀들어가고, 그 다음 rebuild부터는 PlaceSpaceDNA만으로
-순수 평균. 영구 보존이 필요하면 옵션 1(별도 컬럼 + 마이그레이션)로 확장.
+옵션 1 (2026-06-07): 온보딩 설문값을 별도 컬럼 `onboarding_axes`에 영구 보관하고,
+매 rebuild마다 평균 풀에 동등 1건으로 포함한다. 방문이 N곳이면 설문 가중치는
+1/(N+1)로 자연 감쇠하되 0이 되지는 않는다. (이전 옵션 2a는 첫 rebuild에만 mbti_axes
+안의 온보딩을 섞고 그 rebuild가 mbti_axes를 덮어써 원본 설문이 소실됐다.)
+온보딩은 visit이 아니므로 `total_visits` 카운트에는 포함하지 않는다.
 """
 
 from __future__ import annotations
@@ -86,17 +87,15 @@ def _flatten_onboarding_axes(axes: dict | None) -> dict | None:
 def rebuild_user_dna(user_id: int, db: Session) -> int:
     """사용자의 visited 스팟 + PlaceSpaceDNA를 다시 평균 내 user_space_dna에 upsert.
 
-    옵션 2a: 첫 rebuild(`total_visits==0`)에서 user_space_dna에 이미 들어있는
-    온보딩 값(중첩 dict)을 평탄화해 평균 풀에 spot DNA와 함께 1건 추가한다.
-    두 번째 rebuild부터는 자연스럽게 spot DNA만 평균. 온보딩은 visit이 아니므로
-    `total_visits` 카운트에는 포함하지 않는다.
+    옵션 1: `onboarding_axes`(영구 설문 시드)가 있으면 매 rebuild마다 평탄화해
+    평균 풀에 spot DNA와 함께 1건 추가한다. 방문이 쌓이면 설문 가중치는 1/(N+1)로
+    자연 감쇠. 온보딩은 visit이 아니므로 `total_visits` 카운트에는 포함하지 않는다.
 
     반환: 평균 계산에 합산된 visited spot 수 (관측용, 온보딩 row 제외).
     """
     start = time.perf_counter()
 
     existing = db.get(UserSpaceDNA, user_id)
-    is_first_rebuild = existing is not None and existing.total_visits == 0
 
     rows = (
         db.query(PlaceSpaceDNA.mbti_axes)
@@ -112,9 +111,11 @@ def rebuild_user_dna(user_id: int, db: Session) -> int:
     valid = [axes for (axes,) in rows if _is_valid_axes(axes)]
     n_spots = len(valid)
 
+    # 온보딩 설문을 평균 풀의 동등 1표로 영구 포함 (onboarding_axes 컬럼에서 읽음).
+    # n_spots는 append 전에 계산되므로 total_visits는 방문 spot 수만 카운트.
     onboarding_blended = False
-    if is_first_rebuild:
-        flattened = _flatten_onboarding_axes(existing.mbti_axes)
+    if existing is not None and existing.onboarding_axes:
+        flattened = _flatten_onboarding_axes(existing.onboarding_axes)
         if flattened is not None and _is_valid_axes(flattened):
             valid.append(flattened)
             onboarding_blended = True

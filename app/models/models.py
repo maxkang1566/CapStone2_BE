@@ -298,6 +298,9 @@ class UserSpaceDNA(Base):
         Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     mbti_axes: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    # 온보딩 설문 원본을 영구 보관(rebuild가 덮어쓰지 않음). 평균 풀의 동등 1표 영구 시드.
+    # nullable: 온보딩 안 함(NULL) vs 완료(값) 구분 — server_default 없음.
+    onboarding_axes: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     preferred_vibe_tags: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     total_visits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_analyzed: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
